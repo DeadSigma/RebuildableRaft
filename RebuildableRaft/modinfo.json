@@ -1,0 +1,13 @@
+{
+  "name": "Rebuildable Raft",
+  "slug": "rebuildable-raft",
+  "author": "El_Neuman",
+  "description": "Allows placing a new foundation with the building hammer when the raft has been completely destroyed.",
+  "version": "0.1.1",
+    "icon": "icon.png",
+  "banner": "banner.png",
+  "gameVersion": "1.0",
+  "requiredByAllPlayers": false,
+  "isModPermanent": false,
+  "excludedFiles": []
+}
