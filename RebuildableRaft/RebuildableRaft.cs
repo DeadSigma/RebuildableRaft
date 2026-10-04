@@ -33,9 +33,6 @@ public static class BlockCreator_Update_RebuildableRaft
     private static readonly FieldInfo LockedBuildPivotField =
         AccessTools.Field(typeof(BlockCreator), "lockedBuildPivot");
 
-    private static readonly FieldInfo GameManagerField =
-        AccessTools.Field(typeof(BlockCreator), "gameManager");
-
     private static readonly FieldInfo GhostGreenField =
         AccessTools.Field(typeof(GameManager), "ghostMaterialGreen");
 
@@ -315,7 +312,7 @@ public static class BlockCreator_Update_RebuildableRaft
             return;
         }
 
-        object gameManager = GameManagerField.GetValue(null);
+        GameManager gameManager = SingletonGeneric<GameManager>.Singleton;
         if (gameManager == null)
         {
             return;
