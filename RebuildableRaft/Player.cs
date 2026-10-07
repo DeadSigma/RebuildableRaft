@@ -10,6 +10,32 @@ using Unity.Netcode;
 using UltimateWater;
 using UnityEngine;
 
+[HarmonyPatch(typeof(PersonController), "Update")]
+public static class PersonController_Update_RebuildableRaft
+{
+    [HarmonyPrefix]
+    public static void Prefix(
+        PersonController __instance)
+    {
+        if (__instance == null)
+        {
+            return;
+        }
+
+        Network_Player player =
+            __instance.GetComponent<Network_Player>();
+
+        if (player == null ||
+            !player.IsLocalPlayer)
+        {
+            return;
+        }
+
+        Physics.SyncTransforms();
+    }
+}
+
+
 [HarmonyPatch(typeof(PersonController), "SetNetworkProperties")]
 public static class PersonController_SetNetworkProperties_RebuildableRaft
 {

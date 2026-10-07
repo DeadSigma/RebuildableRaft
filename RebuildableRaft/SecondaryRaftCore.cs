@@ -17,41 +17,6 @@ public class SecondaryRaftBlockTag : MonoBehaviour
 
 public class SecondaryRaftCollisionProxy : MonoBehaviour
 {
-    private Collider proxyCollider;
-
-    public void Initialize(
-        Collider source,
-        Collider proxy)
-    {
-        proxyCollider = proxy;
-        RefreshState();
-    }
-
-    public void RefreshState()
-    {
-        if (proxyCollider == null)
-        {
-            proxyCollider = GetComponent<Collider>();
-        }
-
-        if (proxyCollider == null)
-        {
-            return;
-        }
-
-        // Резервная поверхность второго плота всегда остаётся активной
-        proxyCollider.enabled = true;
-    }
-
-    private void FixedUpdate()
-    {
-        RefreshState();
-    }
-
-    private void LateUpdate()
-    {
-        RefreshState();
-    }
 }
 
 public class SecondaryRaftPlayerPivot : MonoBehaviour

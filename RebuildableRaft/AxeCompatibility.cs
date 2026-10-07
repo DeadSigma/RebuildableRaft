@@ -1,4 +1,5 @@
 using HarmonyLib;
+using System;
 using Steamworks;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -30,27 +31,28 @@ public static class Axe_Update_RebuildableRaft
 
         RaycastHit hit;
 
-        if (!Helper.HitAtCursor(
-                out hit,
-                5f,
+        if (!TryGetAxeHit(
+                ___playerNetwork,
                 __instance.hitmask,
-                QueryTriggerInteraction.UseGlobal
-            ) ||
-            hit.collider == null)
+                out hit
+            ))
         {
+            if (___aimedAtBlock != null &&
+                MultiRaftRegistry.IsSecondaryBlock(
+                    ___aimedAtBlock
+                ))
+            {
+                ClearSecondaryTarget(
+                    ___canvas,
+                    ref ___aimedAtBlock,
+                    ref ___currentBlockToRemove,
+                    ref ___chopTimer
+                );
+
+                return false;
+            }
+
             return true;
-        }
-
-        if (IsSyntheticProxy(hit.collider))
-        {
-            ClearSecondaryTarget(
-                ___canvas,
-                ref ___aimedAtBlock,
-                ref ___currentBlockToRemove,
-                ref ___chopTimer
-            );
-
-            return false;
         }
 
         Block block =
@@ -171,6 +173,70 @@ public static class Axe_Update_RebuildableRaft
             ___canvas.SetLoadCircle(
                 ___chopTimer / duration
             );
+        }
+
+        return false;
+    }
+
+    private static bool TryGetAxeHit(
+        Network_Player player,
+        LayerMask hitMask,
+        out RaycastHit selectedHit)
+    {
+        selectedHit = default(RaycastHit);
+
+        if (player == null ||
+            player.CameraTransform == null)
+        {
+            return false;
+        }
+
+        Ray ray =
+            new Ray(
+                player.CameraTransform.position,
+                player.CameraTransform.forward
+            );
+
+        RaycastHit[] hits =
+            Physics.RaycastAll(
+                ray,
+                5f,
+                hitMask,
+                QueryTriggerInteraction.UseGlobal
+            );
+
+        if (hits == null ||
+            hits.Length == 0)
+        {
+            return false;
+        }
+
+        Array.Sort(
+            hits,
+            delegate (
+                RaycastHit left,
+                RaycastHit right)
+            {
+                return left.distance
+                    .CompareTo(right.distance);
+            }
+        );
+
+        for (int i = 0;
+             i < hits.Length;
+             i++)
+        {
+            Collider collider =
+                hits[i].collider;
+
+            if (collider == null ||
+                IsSyntheticProxy(collider))
+            {
+                continue;
+            }
+
+            selectedHit = hits[i];
+            return true;
         }
 
         return false;

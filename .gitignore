@@ -363,3 +363,5 @@ MigrationBackup/
 FodyWeavers.xsd
 /RebuildableRaft/README_SPLIT.txt
 /RebuildableRaft/RebuildableRaft.csproj.bak
+/RebuildableRaft/structure.txt
+/RebuildableRaft/создаёт структуру папок.py

@@ -206,6 +206,7 @@ public class SecondaryRaftRoot : MonoBehaviour
     private float networkRoll;
     private Vector3 networkVelocity;
     private float networkAngularVelocityY;
+    private bool networkStateRelativeToMain;
     private bool hasNetworkState;
 
     private bool waveReferenceInitialized;
@@ -461,44 +462,115 @@ public class SecondaryRaftRoot : MonoBehaviour
         if (!Raft_Network.IsHost &&
             hasNetworkState)
         {
-            float distance =
-                Vector3.Distance(
-                    transform.position,
-                    networkPosition
-                );
+            Vector3 position;
+            Quaternion rotation;
 
-            Vector3 position =
-                distance > 1.5f
-                    ? networkPosition
-                    : Vector3.Lerp(
+            Transform mainPivot =
+                networkStateRelativeToMain
+                    ? MultiRaftRegistry.MainPivot
+                    : null;
+
+            if (mainPivot != null)
+            {
+                Vector3 currentLocalPosition =
+                    mainPivot.InverseTransformPoint(
+                        transform.position
+                    );
+
+                float distance =
+                    Vector3.Distance(
+                        currentLocalPosition,
+                        networkPosition
+                    );
+
+                Vector3 localPosition =
+                    distance > 1.5f
+                        ? networkPosition
+                        : Vector3.Lerp(
+                            currentLocalPosition,
+                            networkPosition,
+                            Time.deltaTime *
+                            NetworkLerpSpeed
+                        );
+
+                float currentRelativeYaw =
+                    Mathf.DeltaAngle(
+                        mainPivot.eulerAngles.y,
+                        transform.eulerAngles.y
+                    );
+
+                float yawDelta =
+                    Mathf.Abs(
+                        Mathf.DeltaAngle(
+                            currentRelativeYaw,
+                            networkYaw
+                        )
+                    );
+
+                float relativeYaw =
+                    yawDelta > 20f
+                        ? networkYaw
+                        : Mathf.LerpAngle(
+                            currentRelativeYaw,
+                            networkYaw,
+                            Time.deltaTime *
+                            NetworkLerpSpeed
+                        );
+
+                position =
+                    mainPivot.TransformPoint(
+                        localPosition
+                    );
+
+                rotation =
+                    Quaternion.Euler(
+                        0f,
+                        mainPivot.eulerAngles.y +
+                            relativeYaw,
+                        0f
+                    );
+            }
+            else
+            {
+                float distance =
+                    Vector3.Distance(
                         transform.position,
-                        networkPosition,
-                        Time.deltaTime *
-                        NetworkLerpSpeed
+                        networkPosition
                     );
 
-            Quaternion targetRotation =
-                Quaternion.Euler(
-                    0f,
-                    networkYaw,
-                    0f
-                );
+                position =
+                    distance > 1.5f
+                        ? networkPosition
+                        : Vector3.Lerp(
+                            transform.position,
+                            networkPosition,
+                            Time.deltaTime *
+                            NetworkLerpSpeed
+                        );
 
-            float angle =
-                Quaternion.Angle(
-                    transform.rotation,
-                    targetRotation
-                );
+                Quaternion targetRotation =
+                    Quaternion.Euler(
+                        0f,
+                        networkYaw,
+                        0f
+                    );
 
-            Quaternion rotation =
-                angle > 20f
-                    ? targetRotation
-                    : Quaternion.Slerp(
+                float angle =
+                    Quaternion.Angle(
                         transform.rotation,
-                        targetRotation,
-                        Time.deltaTime *
-                        NetworkLerpSpeed
+                        targetRotation
                     );
+
+                rotation =
+                    angle > 20f
+                        ? targetRotation
+                        : Quaternion.Slerp(
+                            transform.rotation,
+                            targetRotation,
+                            Time.deltaTime *
+                            NetworkLerpSpeed
+                        );
+            }
 
             transform.SetPositionAndRotation(
                 position,
@@ -515,6 +587,7 @@ public class SecondaryRaftRoot : MonoBehaviour
             }
 
             ApplyNetworkWaveTilt();
+            Physics.SyncTransforms();
         }
     }
 
@@ -889,17 +962,17 @@ public class SecondaryRaftRoot : MonoBehaviour
             return;
         }
 
-        Quaternion targetWorld =
+        Quaternion targetLocal =
             Quaternion.Euler(
                 networkPitch,
-                networkYaw,
+                0f,
                 networkRoll
             );
 
-        wavePivot.rotation =
+        wavePivot.localRotation =
             Quaternion.Slerp(
-                wavePivot.rotation,
-                targetWorld,
+                wavePivot.localRotation,
+                targetLocal,
                 Time.deltaTime *
                 NetworkLerpSpeed
             );
@@ -2436,8 +2509,11 @@ public class SecondaryRaftRoot : MonoBehaviour
         anchorPosition -=
             shift;
 
-        networkPosition -=
-            shift;
+        if (!networkStateRelativeToMain)
+        {
+            networkPosition -=
+                shift;
+        }
     }
 
     public Message_SecondaryRaftState
@@ -2446,6 +2522,39 @@ public class SecondaryRaftRoot : MonoBehaviour
         return new Message_SecondaryRaftState(
             this
         );
+    }
+
+    private void ResolveNetworkTarget(
+        out Vector3 targetPosition,
+        out float targetYaw)
+    {
+        targetPosition =
+            networkPosition;
+
+        targetYaw =
+            networkYaw;
+
+        if (!networkStateRelativeToMain)
+        {
+            return;
+        }
+
+        Transform mainPivot =
+            MultiRaftRegistry.MainPivot;
+
+        if (mainPivot == null)
+        {
+            return;
+        }
+
+        targetPosition =
+            mainPivot.TransformPoint(
+                networkPosition
+            );
+
+        targetYaw =
+            mainPivot.eulerAngles.y +
+            networkYaw;
     }
 
     public void ApplyNetworkState(
@@ -2462,6 +2571,9 @@ public class SecondaryRaftRoot : MonoBehaviour
                 state.y,
                 state.z
             );
+
+        networkStateRelativeToMain =
+            state.relativeToMain;
 
         networkPitch =
             state.pitch;
@@ -2491,13 +2603,18 @@ public class SecondaryRaftRoot : MonoBehaviour
         if (firstState &&
             !Raft_Network.IsHost)
         {
-            Vector3 targetPosition =
-                networkPosition;
+            Vector3 targetPosition;
+            float targetYaw;
+
+            ResolveNetworkTarget(
+                out targetPosition,
+                out targetYaw
+            );
 
             Quaternion targetRotation =
                 Quaternion.Euler(
                     0f,
-                    networkYaw,
+                    targetYaw,
                     0f
                 );
 

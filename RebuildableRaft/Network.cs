@@ -20,6 +20,7 @@ public enum RebuildableRaftMessage
 public class Message_SecondaryRaftState : Message
 {
     public int raftId;
+    public bool relativeToMain;
     public float x;
     public float y;
     public float z;
@@ -45,16 +46,43 @@ public class Message_SecondaryRaftState : Message
         Vector3 position =
             raft.transform.position;
 
+        float raftYaw =
+            raft.transform.eulerAngles.y;
+
+        Transform mainPivot =
+            MultiRaftRegistry.MainPivot;
+
+        if (mainPivot != null)
+        {
+            position =
+                mainPivot.InverseTransformPoint(
+                    position
+                );
+
+            raftYaw =
+                Mathf.DeltaAngle(
+                    mainPivot.eulerAngles.y,
+                    raftYaw
+                );
+
+            relativeToMain = true;
+        }
+
         x = position.x;
         y = position.y;
         z = position.z;
 
-        Vector3 rotation =
-            raft.WaveWorldRotation.eulerAngles;
+        Transform wavePivot =
+            raft.BuildPivot;
 
-        pitch = rotation.x;
-        yaw = raft.transform.eulerAngles.y;
-        roll = rotation.z;
+        Vector3 waveRotation =
+            wavePivot != null
+                ? wavePivot.localEulerAngles
+                : Vector3.zero;
+
+        pitch = waveRotation.x;
+        yaw = raftYaw;
+        roll = waveRotation.z;
 
         Rigidbody body =
             raft.Body;
@@ -72,7 +100,7 @@ public class Message_SecondaryRaftState : Message
     {
         base.SerializeFast(writer);
 
-        if (!writer.TryBeginWrite(40))
+        if (!writer.TryBeginWrite(41))
         {
             throw new OverflowException(
                 "Not enough space in the buffer"
@@ -81,6 +109,11 @@ public class Message_SecondaryRaftState : Message
 
         writer.WriteValue<int>(
             raftId,
+            default(FastBufferWriter.ForPrimitives)
+        );
+
+        writer.WriteValue<bool>(
+            relativeToMain,
             default(FastBufferWriter.ForPrimitives)
         );
 
@@ -137,6 +170,11 @@ public class Message_SecondaryRaftState : Message
 
         reader.ReadValue<int>(
             out raftId,
+            default(FastBufferWriter.ForPrimitives)
+        );
+
+        reader.ReadValue<bool>(
+            out relativeToMain,
             default(FastBufferWriter.ForPrimitives)
         );
 
