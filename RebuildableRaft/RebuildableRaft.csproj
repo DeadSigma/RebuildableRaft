@@ -16,45 +16,55 @@
 
 		<BeforePack>SetReleaseRmodMode;$(BeforePack)</BeforePack>
 
-
+		<RaftDir Condition="'$(RAFT)' != ''">$(RAFT)</RaftDir>
 		<RaftDir Condition="'$(RaftDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Raft</RaftDir>
 		<RmlDir Condition="'$(RmlDir)' == ''">$(APPDATA)\RaftModLoader</RmlDir>
 		<RmlBinariesDir>$(RmlDir)\binaries</RmlBinariesDir>
 		<RmlPublicizedDir>$(RmlDir)\cache\publicizedAssemblies</RmlPublicizedDir>
 
-		<RaftExePath>$(RaftDir)\Raft.exe</RaftExePath>
+		<HmlCoreLibraryPath Condition="Exists('$(RmlBinariesDir)\HMLCoreLibrary.dll')">$(RmlBinariesDir)\HMLCoreLibrary.dll</HmlCoreLibraryPath>
+		<HmlCoreLibraryPath Condition="'$(HmlCoreLibraryPath)' == '' And Exists('$(RmlDir)\HMLCoreLibrary.dll')">$(RmlDir)\HMLCoreLibrary.dll</HmlCoreLibraryPath>
+
+		<CoreModPath Condition="Exists('$(RmlBinariesDir)\coremod.dll')">$(RmlBinariesDir)\coremod.dll</CoreModPath>
+		<CoreModPath Condition="'$(CoreModPath)' == '' And Exists('$(RmlDir)\coremod.dll')">$(RmlDir)\coremod.dll</CoreModPath>
+
+		<SteamworksPath>$(RaftDir)\Raft_Data\Managed\com.rlabrecque.steamworks.net.dll</SteamworksPath>
+
+		<NetcodeRuntimePath Condition="Exists('$(RmlPublicizedDir)\Unity.Netcode.Runtime.dll')">$(RmlPublicizedDir)\Unity.Netcode.Runtime.dll</NetcodeRuntimePath>
+		<NetcodeRuntimePath Condition="'$(NetcodeRuntimePath)' == '' And Exists('$(RaftDir)\Raft_Data\Managed\Unity.Netcode.Runtime.dll')">$(RaftDir)\Raft_Data\Managed\Unity.Netcode.Runtime.dll</NetcodeRuntimePath>
+
 		<RaftModsDir>$(RaftDir)\mods</RaftModsDir>
 	</PropertyGroup>
 
+	<ItemGroup>
+		<PackageReference Include="Lib.Harmony" Version="2.4.2">
+			<PrivateAssets>all</PrivateAssets>
+		</PackageReference>
+	</ItemGroup>
 
 	<ItemGroup>
 		<Reference Include="Assembly-CSharp">
-			<HintPath>$(RmlPublicizedDir)\Assembly-CSharp.dll</HintPath>
+			<HintPath>$(RaftDir)\Raft_Data\Managed\Assembly-CSharp.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+
+		<Reference Include="Assembly-CSharp-firstpass" Condition="Exists('$(RaftDir)\Raft_Data\Managed\Assembly-CSharp-firstpass.dll')">
+			<HintPath>$(RaftDir)\Raft_Data\Managed\Assembly-CSharp-firstpass.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 
 		<Reference Include="HMLCoreLibrary">
-			<HintPath>$(RmlBinariesDir)\HMLCoreLibrary.dll</HintPath>
+			<HintPath>$(HmlCoreLibraryPath)</HintPath>
 			<Private>false</Private>
 		</Reference>
 
 		<Reference Include="coremod">
-			<HintPath>$(RmlBinariesDir)\coremod.dll</HintPath>
+			<HintPath>$(CoreModPath)</HintPath>
 			<Private>false</Private>
 		</Reference>
 
-		<Reference Include="0Harmony">
-			<HintPath>$(RmlBinariesDir)\0Harmony.dll</HintPath>
-			<Private>false</Private>
-		</Reference>
-
-		<Reference Include="SemanticVersion">
-			<HintPath>$(RmlBinariesDir)\SemanticVersion.dll</HintPath>
-			<Private>false</Private>
-		</Reference>
-
-		<Reference Include="SharpZipLib">
-			<HintPath>$(RmlBinariesDir)\SharpZipLib.dll</HintPath>
+		<Reference Include="com.rlabrecque.steamworks.net">
+			<HintPath>$(SteamworksPath)</HintPath>
 			<Private>false</Private>
 		</Reference>
 
@@ -78,36 +88,44 @@
 			<Private>false</Private>
 		</Reference>
 
-		<Reference Include="com.rlabrecque.steamworks.net">
-			<HintPath>$(RaftDir)\Raft_Data\Managed\com.rlabrecque.steamworks.net.dll</HintPath>
+		<Reference Include="UnityEngine.UI">
+			<HintPath>$(RaftDir)\Raft_Data\Managed\UnityEngine.UI.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+
+		<Reference Include="UnityEngine.UIModule">
+			<HintPath>$(RaftDir)\Raft_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+
+		<Reference Include="UnityEngine.TextRenderingModule">
+			<HintPath>$(RaftDir)\Raft_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+
+		<Reference Include="Unity.InputSystem">
+			<HintPath>$(RaftDir)\Raft_Data\Managed\Unity.InputSystem.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+
+		<Reference Include="Unity.Netcode.Runtime">
+			<HintPath>$(NetcodeRuntimePath)</HintPath>
 			<Private>false</Private>
 		</Reference>
 	</ItemGroup>
 
-	<Target Name="ValidateRaftEnvironment" BeforeTargets="ResolveReferences">
-		<Error
-			Condition="!Exists('$(RaftExePath)')"
-			Text="Raft.exe не найден: $(RaftExePath)" />
+	<Target Name="ValidateReferences" BeforeTargets="ResolveReferences">
+		<Error Condition="'$(NetcodeRuntimePath)' == '' Or !Exists('$(NetcodeRuntimePath)')"
+			   Text="Unity.Netcode.Runtime.dll не найден. Проверены: $(RmlPublicizedDir)\Unity.Netcode.Runtime.dll и $(RaftDir)\Raft_Data\Managed\Unity.Netcode.Runtime.dll" />
 
-		<Error
-			Condition="!Exists('$(RmlBinariesDir)\HMLCoreLibrary.dll')"
-			Text="HMLCoreLibrary.dll не найден: $(RmlBinariesDir)\HMLCoreLibrary.dll" />
+		<Error Condition="'$(HmlCoreLibraryPath)' == '' Or !Exists('$(HmlCoreLibraryPath)')"
+			   Text="HMLCoreLibrary.dll не найден. Ожидался в $(RmlBinariesDir)\HMLCoreLibrary.dll" />
 
-		<Error
-			Condition="!Exists('$(RmlBinariesDir)\coremod.dll')"
-			Text="coremod.dll не найден: $(RmlBinariesDir)\coremod.dll" />
+		<Error Condition="'$(CoreModPath)' == '' Or !Exists('$(CoreModPath)')"
+			   Text="coremod.dll не найден. Ожидался в $(RmlBinariesDir)\coremod.dll" />
 
-		<Error
-			Condition="!Exists('$(RmlBinariesDir)\0Harmony.dll')"
-			Text="0Harmony.dll не найден: $(RmlBinariesDir)\0Harmony.dll" />
-
-		<Error
-			Condition="!Exists('$(RmlPublicizedDir)\Assembly-CSharp.dll')"
-			Text="Publicized Assembly-CSharp.dll не найден: $(RmlPublicizedDir)\Assembly-CSharp.dll. Запусти Raft через RML хотя бы один раз" />
-
-		<Error
-			Condition="!Exists('$(RaftDir)\Raft_Data\Managed\com.rlabrecque.steamworks.net.dll')"
-			Text="com.rlabrecque.steamworks.net.dll не найден: $(RaftDir)\Raft_Data\Managed\com.rlabrecque.steamworks.net.dll" />
+		<Error Condition="!Exists('$(SteamworksPath)')"
+			   Text="com.rlabrecque.steamworks.net.dll не найден: $(SteamworksPath)" />
 	</Target>
 
 	<Target Name="SetReleaseRmodMode">
@@ -128,13 +146,16 @@
 		</PropertyGroup>
 
 		<Error Condition="!Exists('$(ProjectDir)modinfo.json')" Text="modinfo.json не найден в корне проекта" />
+		<Error Condition="'$(ModName)' == ''" Text="Поле name не найдено в modinfo.json" />
+		<Error Condition="'$(ModVersion)' == ''" Text="Поле version не найдено в modinfo.json" />
 
 		<RemoveDir Directories="$(DevRmodTempDir)" Condition="Exists('$(DevRmodTempDir)')" />
 		<MakeDir Directories="$(DevRmodTempDir)" />
 		<MakeDir Directories="$(RaftModsDir)" Condition="!Exists('$(RaftModsDir)')" />
 
 		<ItemGroup>
-			<DevRmodFiles Include="$(ProjectDir)**\*" Exclude="$(ProjectDir)bin\**;$(ProjectDir)obj\**" />
+			<DevRmodFiles Include="$(ProjectDir)**\*"
+						  Exclude="$(ProjectDir)bin\**;$(ProjectDir)obj\**;$(ProjectDir)releases\**" />
 			<OldInstalledRmods Include="$(RaftModsDir)\$(ModName) v*.rmod" />
 		</ItemGroup>
 
@@ -142,7 +163,7 @@
 			  DestinationFiles="@(DevRmodFiles->'$(DevRmodTempDir)%(RecursiveDir)%(Filename)%(Extension)')"
 			  SkipUnchangedFiles="false" />
 
-		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = '$(DevRmodTempDir)modinfo.json'; if (!(Test-Path -LiteralPath $p)) { throw 'DEV modinfo.json не найден' }; $c = [IO.File]::ReadAllText($p); if ($c -notmatch 'isModPermanent\x22\s*:') { throw 'Поле isModPermanent не найдено в modinfo.json' }; $c = [regex]::Replace($c, '(isModPermanent\x22\s*:\s*)(true|false)', '${1}true', [Text.RegularExpressions.RegexOptions]::IgnoreCase); [IO.File]::WriteAllText($p, $c, [Text.UTF8Encoding]::new($false))&quot;" />
+		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = '$(DevRmodTempDir)modinfo.json'; if (!(Test-Path -LiteralPath $p)) { throw 'DEV modinfo.json не найден' }; $c = [IO.File]::ReadAllText($p); if ($c -match 'isModPermanent\x22\s*:') { $c = [regex]::Replace($c, '(isModPermanent\x22\s*:\s*)(true|false)', '${1}true', [Text.RegularExpressions.RegexOptions]::IgnoreCase); [IO.File]::WriteAllText($p, $c, [Text.UTF8Encoding]::new($false)) }&quot;" />
 
 		<Delete Files="@(OldInstalledRmods)" />
 		<Delete Files="$(LegacyDevRmodFile)" Condition="Exists('$(LegacyDevRmodFile)')" />
@@ -168,6 +189,8 @@
 		</PropertyGroup>
 
 		<Error Condition="!Exists('$(ProjectDir)modinfo.json')" Text="modinfo.json не найден в корне проекта" />
+		<Error Condition="'$(ModName)' == ''" Text="Поле name не найдено в modinfo.json" />
+		<Error Condition="'$(ModVersion)' == ''" Text="Поле version не найдено в modinfo.json" />
 
 		<RemoveDir Directories="$(ReleaseRmodTempDir)" Condition="Exists('$(ReleaseRmodTempDir)')" />
 		<MakeDir Directories="$(ReleaseRmodTempDir)" />
@@ -175,14 +198,14 @@
 
 		<ItemGroup>
 			<ReleaseRmodFiles Include="$(ProjectDir)**\*"
-							  Exclude="$(ProjectDir)bin\**;$(ProjectDir)obj\**;$(ProjectDir)**\DevAutoLoad.cs" />
+							  Exclude="$(ProjectDir)bin\**;$(ProjectDir)obj\**;$(ProjectDir)releases\**;$(ProjectDir)**\DevAutoLoad.cs" />
 		</ItemGroup>
 
 		<Copy SourceFiles="@(ReleaseRmodFiles)"
 			  DestinationFiles="@(ReleaseRmodFiles->'$(ReleaseRmodTempDir)%(RecursiveDir)%(Filename)%(Extension)')"
 			  SkipUnchangedFiles="false" />
 
-		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = '$(ReleaseRmodTempDir)modinfo.json'; if (!(Test-Path -LiteralPath $p)) { throw 'Release modinfo.json не найден' }; $c = [IO.File]::ReadAllText($p); if ($c -notmatch 'isModPermanent\x22\s*:') { throw 'Поле isModPermanent не найдено в modinfo.json' }; $c = [regex]::Replace($c, '(isModPermanent\x22\s*:\s*)(true|false)', '${1}false', [Text.RegularExpressions.RegexOptions]::IgnoreCase); [IO.File]::WriteAllText($p, $c, [Text.UTF8Encoding]::new($false))&quot;" />
+		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = '$(ReleaseRmodTempDir)modinfo.json'; if (!(Test-Path -LiteralPath $p)) { throw 'Release modinfo.json не найден' }; $c = [IO.File]::ReadAllText($p); if ($c -match 'isModPermanent\x22\s*:') { $c = [regex]::Replace($c, '(isModPermanent\x22\s*:\s*)(true|false)', '${1}false', [Text.RegularExpressions.RegexOptions]::IgnoreCase); [IO.File]::WriteAllText($p, $c, [Text.UTF8Encoding]::new($false)) }&quot;" />
 
 		<Delete Files="$(ReleaseRmodFile)" Condition="Exists('$(ReleaseRmodFile)')" />
 
@@ -195,12 +218,8 @@
 		<Message Importance="high" Text="Release RMod создан: $(ReleaseRmodFile)" />
 	</Target>
 
-	<Target
-		Name="LaunchRaftAutoLoad"
-		AfterTargets="Rebuild">
-
-		<Exec
-			Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = Get-Process -Name Raft -ErrorAction SilentlyContinue; if ($null -ne $p) { Write-Warning 'Raft уже запущен - закрой игру и запусти сборку ещё раз'; exit 0 }; $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamExe; if ([string]::IsNullOrWhiteSpace($steam)) { $steam = Join-Path ${env:ProgramFiles(x86)} 'Steam\steam.exe' }; if (!(Test-Path $steam)) { throw 'Steam.exe не найден' }; Start-Process -FilePath $steam -ArgumentList '-applaunch 648800','-rml','-rebuildableraft-autoload'; Write-Host 'Raft запущен через Steam с RML и автозагрузкой мира'&quot;" />
+	<Target Name="LaunchRaftDev" AfterTargets="Rebuild">
+		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = Get-Process -Name Raft -ErrorAction SilentlyContinue; if ($null -ne $p) { Write-Warning 'Raft уже запущен - закрой игру и запусти сборку ещё раз'; exit 0 }; $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamExe; if ([string]::IsNullOrWhiteSpace($steam)) { $steam = Join-Path ${env:ProgramFiles(x86)} 'Steam\steam.exe' }; if (!(Test-Path $steam)) { throw 'Steam.exe не найден' }; Start-Process -FilePath $steam -ArgumentList '-applaunch 648800 -rml -RebuildableRaft-dev'; Write-Host 'Raft запущен через Steam с RML'&quot;" />
 	</Target>
 
 </Project>
