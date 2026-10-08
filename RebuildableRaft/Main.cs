@@ -12,9 +12,21 @@ using UnityEngine;
 
 public class RebuildableRaft : Mod
 {
-    internal const int MultiRaftNetworkChannel = 71;
+    internal const string MultiRaftNetworkChannel = "el.rebuildableraft.network.v2";
+    private const int NetworkProtocolVersion = 2;
 
-    private const float NetworkSyncInterval = 0.1f;
+    private static RebuildableRaft activeInstance;
+    private static readonly Dictionary<int, int> outgoingSequences = new Dictionary<int, int>();
+    private static readonly Dictionary<int, int> incomingSequences = new Dictionary<int, int>();
+    private static int sentStates;
+    private static int receivedStates;
+    private static int appliedStates;
+    private static int unknownRafts;
+    private static int obsoleteStates;
+    private static float nextStatusLogTime;
+    private static float nextWarningTime;
+
+    private const float NetworkSyncInterval = 0.05f;
     private const float RaftNameSyncInterval = 2f;
 
     private Harmony harmony;
@@ -23,6 +35,18 @@ public class RebuildableRaft : Mod
 
     public void Awake()
     {
+        activeInstance = this;
+        outgoingSequences.Clear();
+        incomingSequences.Clear();
+        sentStates = 0;
+        receivedStates = 0;
+        appliedStates = 0;
+        unknownRafts = 0;
+        obsoleteStates = 0;
+        nextStatusLogTime = Time.realtimeSinceStartup + 5f;
+        nextWarningTime = 0f;
+
+        SubscribeToNetworkChannel(MultiRaftNetworkChannel);
         MultiRaftRegistry.Reset();
         RaftNameRegistry.Reset();
 
@@ -39,8 +63,25 @@ public class RebuildableRaft : Mod
             return;
         }
 
-        ReceiveNetworkMessages();
         RaftRenameWindow.Update();
+
+        if (Time.realtimeSinceStartup >= nextStatusLogTime)
+        {
+            nextStatusLogTime = Time.realtimeSinceStartup + 5f;
+            Debug.Log("[RebuildableRaft][NetChannel] role=" +
+                (Raft_Network.IsHost ? "HOST" : "CLIENT") +
+                " sent=" + sentStates +
+                " recv=" + receivedStates +
+                " applied=" + appliedStates +
+                " missingRoot=" + unknownRafts +
+                " stale=" + obsoleteStates);
+
+            foreach (SecondaryRaftRoot raft in MultiRaftRegistry.GetRoots())
+            {
+                if (raft != null && raft.HasPlacedBlocks)
+                    Debug.Log(raft.BuildPeriodicDiagnosticLine());
+            }
+        }
 
         if (!Raft_Network.IsHost)
         {
@@ -52,7 +93,11 @@ public class RebuildableRaft : Mod
 
         if (networkSyncTimer >= NetworkSyncInterval)
         {
-            networkSyncTimer = 0f;
+            networkSyncTimer = Mathf.Clamp(
+                networkSyncTimer - NetworkSyncInterval,
+                0f,
+                NetworkSyncInterval
+            );
             SendRaftStates();
         }
 
@@ -65,6 +110,8 @@ public class RebuildableRaft : Mod
 
     public override void WorldEvent_WorldLoaded()
     {
+        incomingSequences.Clear();
+        outgoingSequences.Clear();
         MultiRaftRegistry.RebuildFromScene();
         RaftNameRegistry.LoadCurrentWorld();
 
@@ -81,6 +128,8 @@ public class RebuildableRaft : Mod
         RaftReceiverRadar.Reset();
         RaftNameRegistry.Reset();
         MultiRaftRegistry.Reset();
+        incomingSequences.Clear();
+        outgoingSequences.Clear();
     }
 
     public void OnModUnload()
@@ -95,6 +144,9 @@ public class RebuildableRaft : Mod
 
         RaftNameRegistry.Reset();
         MultiRaftRegistry.Reset();
+        activeInstance = null;
+        outgoingSequences.Clear();
+        incomingSequences.Clear();
 
         Debug.Log("[RebuildableRaft] Unloaded");
     }
@@ -104,19 +156,68 @@ public class RebuildableRaft : Mod
         foreach (SecondaryRaftRoot raft in MultiRaftRegistry.GetRoots())
         {
             if (raft == null || !raft.HasPlacedBlocks)
-            {
                 continue;
-            }
 
-#pragma warning disable CS0618
-            RAPI.SendNetworkMessage(
-                raft.CreateStateMessage(),
-                MultiRaftNetworkChannel,
-                EP2PSend.k_EP2PSendReliable,
-                Target.Other
-            );
-#pragma warning restore CS0618
+            Message_SecondaryRaftState state = raft.CreateStateMessage();
+            state.protocolVersion = NetworkProtocolVersion;
+
+            int previous;
+            outgoingSequences.TryGetValue(state.raftId, out previous);
+            state.sequence = previous + 1;
+            outgoingSequences[state.raftId] = state.sequence;
+
+            if (state.sequence % 40 == 0)
+                Debug.Log(raft.BuildPacketDiagnosticLine("SEND", state));
+
+            SendNetworkPayload(state, EP2PSend.k_EP2PSendUnreliable);
+            sentStates++;
         }
+    }
+
+    private static void SendNetworkPayload(object payload, EP2PSend sendType)
+    {
+        if (activeInstance == null || payload == null)
+            return;
+
+        // Сообщение отправляется через подписку RML без устаревшей очереди oldmsg_
+        activeInstance.SendNetworkMessage(
+            payload,
+            Target.Other,
+            sendType,
+            MultiRaftNetworkChannel
+        );
+    }
+
+    public override bool OnNetworkMessage(
+        object message,
+        Network_UserId from,
+        string channel)
+    {
+        if (channel != MultiRaftNetworkChannel)
+            return false;
+
+        Message_SecondaryRaftState state = message as Message_SecondaryRaftState;
+        if (state != null)
+        {
+            ReceiveRaftState(state);
+            return true;
+        }
+
+        Message_RaftName raftName = message as Message_RaftName;
+        if (raftName != null)
+        {
+            ReceiveRaftName(raftName);
+            return true;
+        }
+
+        if (Time.realtimeSinceStartup >= nextWarningTime)
+        {
+            nextWarningTime = Time.realtimeSinceStartup + 10f;
+            Debug.LogWarning("[RebuildableRaft][NetChannel] Unsupported packet: " +
+                (message == null ? "null" : message.GetType().FullName));
+        }
+
+        return false;
     }
 
     internal static void RequestRaftNameChange(
@@ -145,18 +246,14 @@ public class RebuildableRaft : Mod
             return;
         }
 
-#pragma warning disable CS0618
-        RAPI.SendNetworkMessage(
+        SendNetworkPayload(
             new Message_RaftName(
                 raftId,
                 normalized,
                 true
             ),
-            MultiRaftNetworkChannel,
-            EP2PSend.k_EP2PSendReliable,
-            Target.Other
+            EP2PSend.k_EP2PSendReliable
         );
-#pragma warning restore CS0618
     }
 
     private static void BroadcastAllRaftNames()
@@ -186,82 +283,62 @@ public class RebuildableRaft : Mod
         int raftId,
         string raftName)
     {
-#pragma warning disable CS0618
-        RAPI.SendNetworkMessage(
+        SendNetworkPayload(
             new Message_RaftName(
                 raftId,
                 raftName,
                 false
             ),
-            MultiRaftNetworkChannel,
-            EP2PSend.k_EP2PSendReliable,
-            Target.Other
+            EP2PSend.k_EP2PSendReliable
         );
-#pragma warning restore CS0618
     }
 
-#pragma warning disable CS0618
-    private static void ReceiveNetworkMessages()
+    private static void ReceiveRaftState(Message_SecondaryRaftState state)
     {
-        for (int i = 0; i < 64; i++)
+        if (state == null || Raft_Network.IsHost)
+            return;
+
+        receivedStates++;
+        if (state.protocolVersion != NetworkProtocolVersion)
         {
-            NetworkMessage networkMessage =
-                RAPI.ListenForNetworkMessagesOnChannel(
-                    MultiRaftNetworkChannel
-                );
-
-            if (networkMessage == null)
+            if (Time.realtimeSinceStartup >= nextWarningTime)
             {
-                break;
+                nextWarningTime = Time.realtimeSinceStartup + 10f;
+                Debug.LogWarning("[RebuildableRaft][NetChannel] Protocol mismatch for raft=" +
+                    state.raftId + " got=" + state.protocolVersion +
+                    " expected=" + NetworkProtocolVersion);
             }
-
-            Message message =
-                networkMessage.message;
-
-            if (message == null)
-            {
-                continue;
-            }
-
-            if (message.Type ==
-                (Messages)RebuildableRaftMessage.SecondaryRaftState)
-            {
-                ReceiveRaftState(
-                    message as Message_SecondaryRaftState
-                );
-
-                continue;
-            }
-
-            if (message.Type ==
-                (Messages)RebuildableRaftMessage.RaftName)
-            {
-                ReceiveRaftName(
-                    message as Message_RaftName
-                );
-            }
-        }
-    }
-#pragma warning restore CS0618
-
-    private static void ReceiveRaftState(
-        Message_SecondaryRaftState state)
-    {
-        if (state == null ||
-            Raft_Network.IsHost)
-        {
             return;
         }
 
-        SecondaryRaftRoot raft =
-            MultiRaftRegistry.GetRoot(
-                state.raftId
-            );
-
-        if (raft != null)
+        int previous;
+        if (incomingSequences.TryGetValue(state.raftId, out previous) &&
+            state.sequence <= previous)
         {
-            raft.ApplyNetworkState(state);
+            obsoleteStates++;
+            return;
         }
+
+        SecondaryRaftRoot raft = MultiRaftRegistry.GetRoot(state.raftId);
+        if (raft == null)
+        {
+            unknownRafts++;
+            if (Time.realtimeSinceStartup >= nextWarningTime)
+            {
+                nextWarningTime = Time.realtimeSinceStartup + 10f;
+                Debug.LogWarning("[RebuildableRaft][NetChannel] Missing raft root id=" +
+                    state.raftId + " seq=" + state.sequence);
+            }
+            // Пакет не фиксируется как принятый, следующий сможет примениться после создания плота
+            return;
+        }
+
+        incomingSequences[state.raftId] = state.sequence;
+        raft.ApplyNetworkState(state);
+        appliedStates++;
+
+        if (state.sequence % 40 == 0)
+            Debug.Log(raft.BuildPacketDiagnosticLine("RECV", state));
     }
 
     private static void ReceiveRaftName(

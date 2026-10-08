@@ -1,24 +1,16 @@
 using HarmonyLib;
 using HMLLibrary;
-using Steamworks;
 using System;
-using System.Collections.Generic;
-using System.Reflection;
-using System.Runtime.CompilerServices;
-using System.Runtime.Serialization;
-using Unity.Netcode;
-using UltimateWater;
 using UnityEngine;
 
-public enum RebuildableRaftMessage
-{
-    SecondaryRaftState = 8127,
-    RaftName = 8128
-}
-
 [Serializable]
-public class Message_SecondaryRaftState : Message
+public class Message_SecondaryRaftState
 {
+    public int protocolVersion = 2;
+    public int sequence;
+    public uint debugSequence;
+    public int debugHostFrame;
+    public float debugHostTime;
     public int raftId;
     public bool relativeToMain;
     public float x;
@@ -35,36 +27,23 @@ public class Message_SecondaryRaftState : Message
     {
     }
 
-    public Message_SecondaryRaftState(
-        SecondaryRaftRoot raft)
-        : base(
-            (Messages)RebuildableRaftMessage.SecondaryRaftState
-        )
+    public Message_SecondaryRaftState(SecondaryRaftRoot raft)
     {
+        debugSequence = raft.NextNetworkDebugSequence();
+        debugHostFrame = Time.frameCount;
+        debugHostTime = Time.time;
         raftId = raft.RaftId;
-
-        Vector3 position =
-            raft.transform.position;
-
-        float raftYaw =
-            raft.transform.eulerAngles.y;
-
-        Transform mainPivot =
-            MultiRaftRegistry.MainPivot;
+        Vector3 position = raft.transform.position;
+        float raftYaw = raft.transform.eulerAngles.y;
+        Transform mainPivot = SecondaryRaftRoot.GetMainNetworkAnchor();
 
         if (mainPivot != null)
         {
-            position =
-                mainPivot.InverseTransformPoint(
-                    position
-                );
-
-            raftYaw =
-                Mathf.DeltaAngle(
-                    mainPivot.eulerAngles.y,
-                    raftYaw
-                );
-
+            Vector3 delta = position - mainPivot.position;
+            Quaternion inverseMainYaw = Quaternion.Euler(0f, -mainPivot.eulerAngles.y, 0f);
+            Vector3 relative = inverseMainYaw * new Vector3(delta.x, 0f, delta.z);
+            position = new Vector3(relative.x, position.y, relative.z);
+            raftYaw = Mathf.DeltaAngle(mainPivot.eulerAngles.y, raftYaw);
             relativeToMain = true;
         }
 
@@ -72,21 +51,13 @@ public class Message_SecondaryRaftState : Message
         y = position.y;
         z = position.z;
 
-        Transform wavePivot =
-            raft.BuildPivot;
-
-        Vector3 waveRotation =
-            wavePivot != null
-                ? wavePivot.localEulerAngles
-                : Vector3.zero;
-
+        Transform wavePivot = raft.BuildPivot;
+        Vector3 waveRotation = wavePivot != null ? wavePivot.localEulerAngles : Vector3.zero;
         pitch = waveRotation.x;
         yaw = raftYaw;
         roll = waveRotation.z;
 
-        Rigidbody body =
-            raft.Body;
-
+        Rigidbody body = raft.Body;
         if (body != null)
         {
             velocityX = body.velocity.x;
@@ -94,141 +65,12 @@ public class Message_SecondaryRaftState : Message
             angularVelocityY = body.angularVelocity.y;
         }
     }
-
-    public override void SerializeFast(
-        FastBufferWriter writer)
-    {
-        base.SerializeFast(writer);
-
-        if (!writer.TryBeginWrite(41))
-        {
-            throw new OverflowException(
-                "Not enough space in the buffer"
-            );
-        }
-
-        writer.WriteValue<int>(
-            raftId,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<bool>(
-            relativeToMain,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            x,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            y,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            z,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            pitch,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            yaw,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            roll,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            velocityX,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            velocityZ,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<float>(
-            angularVelocityY,
-            default(FastBufferWriter.ForPrimitives)
-        );
-    }
-
-    public override void DeserializeFast(
-        FastBufferReader reader)
-    {
-        base.DeserializeFast(reader);
-
-        reader.ReadValue<int>(
-            out raftId,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<bool>(
-            out relativeToMain,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out x,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out y,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out z,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out pitch,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out yaw,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out roll,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out velocityX,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out velocityZ,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<float>(
-            out angularVelocityY,
-            default(FastBufferWriter.ForPrimitives)
-        );
-    }
 }
 
-
 [Serializable]
-public class Message_RaftName : Message
+public class Message_RaftName
 {
+    public int protocolVersion = 2;
     public int raftId;
     public bool request;
     public string raftName;
@@ -237,127 +79,11 @@ public class Message_RaftName : Message
     {
     }
 
-    public Message_RaftName(
-        int raftId,
-        string raftName,
-        bool request)
-        : base(
-            (Messages)RebuildableRaftMessage.RaftName
-        )
+    public Message_RaftName(int raftId, string raftName, bool request)
     {
         this.raftId = raftId;
-        this.raftName =
-            RaftNameRegistry.NormalizeName(
-                raftName,
-                raftId
-            );
+        this.raftName = RaftNameRegistry.NormalizeName(raftName, raftId);
         this.request = request;
-    }
-
-    public override void SerializeFast(
-        FastBufferWriter writer)
-    {
-        base.SerializeFast(writer);
-
-        byte[] bytes =
-            System.Text.Encoding.UTF8.GetBytes(
-                raftName ?? string.Empty
-            );
-
-        if (bytes.Length > 96)
-        {
-            Array.Resize(
-                ref bytes,
-                96
-            );
-        }
-
-        ushort length =
-            (ushort)bytes.Length;
-
-        if (!writer.TryBeginWrite(
-                7 + length
-            ))
-        {
-            throw new OverflowException(
-                "Not enough space in the buffer"
-            );
-        }
-
-        writer.WriteValue<int>(
-            raftId,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<bool>(
-            request,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        writer.WriteValue<ushort>(
-            length,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        for (int i = 0; i < bytes.Length; i++)
-        {
-            writer.WriteValue<byte>(
-                bytes[i],
-                default(FastBufferWriter.ForPrimitives)
-            );
-        }
-    }
-
-    public override void DeserializeFast(
-        FastBufferReader reader)
-    {
-        base.DeserializeFast(reader);
-
-        reader.ReadValue<int>(
-            out raftId,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        reader.ReadValue<bool>(
-            out request,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        ushort length;
-
-        reader.ReadValue<ushort>(
-            out length,
-            default(FastBufferWriter.ForPrimitives)
-        );
-
-        int safeLength =
-            Mathf.Min(
-                (int)length,
-                96
-            );
-
-        byte[] bytes =
-            new byte[safeLength];
-
-        for (int i = 0; i < length; i++)
-        {
-            byte value;
-
-            reader.ReadValue<byte>(
-                out value,
-                default(FastBufferWriter.ForPrimitives)
-            );
-
-            if (i < safeLength)
-            {
-                bytes[i] = value;
-            }
-        }
-
-        raftName =
-            System.Text.Encoding.UTF8.GetString(
-                bytes
-            );
     }
 }
 
@@ -407,10 +133,20 @@ public static class Message_Player_Update_Constructor_RebuildableRaft
             return;
         }
 
-        __instance.RaftAsParent =
-            false;
+        Transform mainPivot =
+            MultiRaftRegistry.MainPivot;
 
-        __instance.Position =
-            personController.transform.position;
+        if (mainPivot != null)
+        {
+            __instance.RaftAsParent = true;
+            __instance.Position = mainPivot.InverseTransformPoint(
+                personController.transform.position
+            );
+        }
+        else
+        {
+            __instance.RaftAsParent = false;
+            __instance.Position = personController.transform.position;
+        }
     }
 }

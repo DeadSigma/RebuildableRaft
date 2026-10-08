@@ -3,6 +3,7 @@ using HMLLibrary;
 using Steamworks;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
@@ -133,6 +134,14 @@ public class SecondaryRaftCollisionRelay : MonoBehaviour
 
 public class SecondaryRaftRoot : MonoBehaviour
 {
+    internal static Transform GetMainNetworkAnchor()
+    {
+        Raft mainRaft = ComponentManager<Raft>.Value;
+        return mainRaft != null
+            ? mainRaft.transform
+            : MultiRaftRegistry.MainPivot;
+    }
+
     private const float DefaultWaterDriftSpeed = 1.5f;
     private const float DefaultMaxMovementSpeed = 1.5f;
     private const float DefaultMaxVelocity = 5f;
@@ -155,6 +164,24 @@ public class SecondaryRaftRoot : MonoBehaviour
         AccessTools.Field(
             typeof(Raft),
             "maxDistanceFromAnchorPoint"
+        );
+
+    private static readonly FieldInfo MainRaftNetworkPositionField =
+        AccessTools.Field(
+            typeof(Raft),
+            "networkPosition"
+        );
+
+    private static readonly FieldInfo MainRaftNetworkYawField =
+        AccessTools.Field(
+            typeof(Raft),
+            "networkYRot"
+        );
+
+    private static readonly FieldInfo MainRaftNetworkVelocityField =
+        AccessTools.Field(
+            typeof(Raft),
+            "networkVelocity"
         );
 
     private static int cachedRaftGroundLayer = -1;
@@ -208,6 +235,17 @@ public class SecondaryRaftRoot : MonoBehaviour
     private float networkAngularVelocityY;
     private bool networkStateRelativeToMain;
     private bool hasNetworkState;
+
+    private bool clientRelativePoseInitialized;
+    private Vector3 clientSmoothedRelativePosition;
+    private float clientSmoothedRelativeYaw;
+
+    private uint debugNextSequence;
+    private uint debugLastReceivedSequence;
+    private float debugLastReceiveTime;
+    private int debugReceivedSinceLog;
+    private int debugMissingSinceLog;
+    private int debugOutOfOrderSinceLog;
 
     private bool waveReferenceInitialized;
     private float mainWaveReferenceY;
@@ -467,86 +505,142 @@ public class SecondaryRaftRoot : MonoBehaviour
 
             Transform mainPivot =
                 networkStateRelativeToMain
-                    ? MultiRaftRegistry.MainPivot
+                    ? GetMainNetworkAnchor()
                     : null;
 
             if (mainPivot != null)
             {
-                Vector3 currentLocalPosition =
-                    mainPivot.InverseTransformPoint(
-                        transform.position
+                float mainYaw =
+                    mainPivot.eulerAngles.y;
+
+                Quaternion mainYawRotation =
+                    Quaternion.Euler(
+                        0f,
+                        mainYaw,
+                        0f
                     );
 
-                float distance =
-                    Vector3.Distance(
-                        currentLocalPosition,
-                        networkPosition
+                Vector3 targetLocalPosition =
+                    new Vector3(
+                        networkPosition.x,
+                        0f,
+                        networkPosition.z
                     );
 
-                Vector3 localPosition =
-                    distance > 1.5f
-                        ? networkPosition
-                        : Vector3.Lerp(
-                            currentLocalPosition,
-                            networkPosition,
-                            Time.deltaTime *
-                            NetworkLerpSpeed
+                if (!clientRelativePoseInitialized)
+                {
+                    clientSmoothedRelativePosition =
+                        targetLocalPosition;
+
+                    clientSmoothedRelativeYaw =
+                        networkYaw;
+
+                    clientRelativePoseInitialized =
+                        true;
+                }
+                else
+                {
+                    float distance =
+                        Vector3.Distance(
+                            clientSmoothedRelativePosition,
+                            targetLocalPosition
                         );
 
-                float currentRelativeYaw =
-                    Mathf.DeltaAngle(
-                        mainPivot.eulerAngles.y,
-                        transform.eulerAngles.y
-                    );
+                    clientSmoothedRelativePosition =
+                        distance > 1.5f
+                            ? targetLocalPosition
+                            : Vector3.Lerp(
+                                clientSmoothedRelativePosition,
+                                targetLocalPosition,
+                                Time.deltaTime *
+                                NetworkLerpSpeed
+                            );
 
-                float yawDelta =
-                    Mathf.Abs(
-                        Mathf.DeltaAngle(
-                            currentRelativeYaw,
-                            networkYaw
-                        )
-                    );
-
-                float relativeYaw =
-                    yawDelta > 20f
-                        ? networkYaw
-                        : Mathf.LerpAngle(
-                            currentRelativeYaw,
-                            networkYaw,
-                            Time.deltaTime *
-                            NetworkLerpSpeed
+                    float yawDelta =
+                        Mathf.Abs(
+                            Mathf.DeltaAngle(
+                                clientSmoothedRelativeYaw,
+                                networkYaw
+                            )
                         );
+
+                    clientSmoothedRelativeYaw =
+                        yawDelta > 20f
+                            ? networkYaw
+                            : Mathf.LerpAngle(
+                                clientSmoothedRelativeYaw,
+                                networkYaw,
+                                Time.deltaTime *
+                                NetworkLerpSpeed
+                            );
+                }
+
+                Vector3 flatPosition =
+                    mainPivot.position +
+                    mainYawRotation *
+                    clientSmoothedRelativePosition;
 
                 position =
-                    mainPivot.TransformPoint(
-                        localPosition
+                    new Vector3(
+                        flatPosition.x,
+                        ResolveClientWaterY(
+                            flatPosition,
+                            transform.position.y,
+                            false
+                        ),
+                        flatPosition.z
                     );
 
                 rotation =
                     Quaternion.Euler(
                         0f,
-                        mainPivot.eulerAngles.y +
-                            relativeYaw,
+                        mainYaw +
+                        clientSmoothedRelativeYaw,
                         0f
                     );
             }
             else
             {
-                float distance =
-                    Vector3.Distance(
-                        transform.position,
-                        networkPosition
+                Vector3 currentFlat =
+                    new Vector3(
+                        transform.position.x,
+                        0f,
+                        transform.position.z
                     );
 
-                position =
+                Vector3 targetFlat =
+                    new Vector3(
+                        networkPosition.x,
+                        0f,
+                        networkPosition.z
+                    );
+
+                float distance =
+                    Vector3.Distance(
+                        currentFlat,
+                        targetFlat
+                    );
+
+                Vector3 flatPosition =
                     distance > 1.5f
-                        ? networkPosition
+                        ? targetFlat
                         : Vector3.Lerp(
-                            transform.position,
-                            networkPosition,
+                            currentFlat,
+                            targetFlat,
                             Time.deltaTime *
                             NetworkLerpSpeed
                         );
+
+                position =
+                    new Vector3(
+                        flatPosition.x,
+                        ResolveClientWaterY(
+                            flatPosition,
+                            transform.position.y,
+                            false
+                        ),
+                        flatPosition.z
+                    );
 
                 Quaternion targetRotation =
                     Quaternion.Euler(
@@ -586,8 +680,22 @@ public class SecondaryRaftRoot : MonoBehaviour
                     rotation;
             }
 
-            ApplyNetworkWaveTilt();
+            AlignClientWavePivot();
+            PrepareWavePoseForFrame();
             Physics.SyncTransforms();
+        }
+    }
+
+    private void AlignClientWavePivot()
+    {
+        if (Raft_Network.IsHost || wavePivot == null)
+        {
+            return;
+        }
+
+        if (wavePivot.localPosition.sqrMagnitude > 0.00000001f)
+        {
+            wavePivot.localPosition = Vector3.zero;
         }
     }
 
@@ -656,8 +764,9 @@ public class SecondaryRaftRoot : MonoBehaviour
         collisionBody.useGravity = false;
         collisionBody.isKinematic = true;
         collisionBody.detectCollisions = true;
-        collisionBody.interpolation =
-            RigidbodyInterpolation.Interpolate;
+        collisionBody.interpolation = Raft_Network.IsHost
+            ? RigidbodyInterpolation.Interpolate
+            : RigidbodyInterpolation.None;
 
         SecondaryRaftCollisionRelay relay =
             wavePivot.GetComponent
@@ -768,17 +877,63 @@ public class SecondaryRaftRoot : MonoBehaviour
             return;
         }
 
-        if (Raft_Network.IsHost)
+        if (Raft_Network.IsHost ||
+            hasNetworkState)
         {
             UpdateWaveTilt();
-        }
-        else if (hasNetworkState)
-        {
-            ApplyNetworkWaveTilt();
         }
 
         Physics.SyncTransforms();
     }
+
+    private float ResolveClientWaterY(
+        Vector3 worldPosition,
+        float currentY,
+        bool snap)
+    {
+        float targetY;
+
+        if (!SecondaryRaftWaterSampler
+                .TryGetSurfaceY(
+                    worldPosition,
+                    WaterSurfaceOffset,
+                    out targetY
+                ))
+        {
+            GameManager gameManager =
+                SingletonGeneric<GameManager>.Singleton;
+
+            if (gameManager != null &&
+                gameManager.buoyancy != null)
+            {
+                targetY =
+                    gameManager.buoyancy.CenterPointY;
+            }
+            else
+            {
+                targetY =
+                    networkPosition.y;
+            }
+        }
+
+        if (snap)
+        {
+            return targetY;
+        }
+
+        float follow =
+            1f - Mathf.Exp(
+                -WaveHeightFollowSpeed *
+                Time.deltaTime
+            );
+
+        return Mathf.Lerp(
+            currentY,
+            targetY,
+            follow
+        );
+    }
+
 
     private void UpdateWaveTilt()
     {
@@ -1511,7 +1666,75 @@ public class SecondaryRaftRoot : MonoBehaviour
 
     private void LateUpdate()
     {
+        ReapplyClientRelativePose();
         CaptureCarryPose();
+    }
+
+    private void ReapplyClientRelativePose()
+    {
+        if (Raft_Network.IsHost ||
+            !hasNetworkState ||
+            !networkStateRelativeToMain ||
+            !clientRelativePoseInitialized)
+        {
+            return;
+        }
+
+        Transform mainPivot =
+            GetMainNetworkAnchor();
+
+        if (mainPivot == null)
+        {
+            return;
+        }
+
+        float mainYaw =
+            mainPivot.eulerAngles.y;
+
+        Quaternion mainYawRotation =
+            Quaternion.Euler(
+                0f,
+                mainYaw,
+                0f
+            );
+
+        Vector3 flatPosition =
+            mainPivot.position +
+            mainYawRotation *
+            clientSmoothedRelativePosition;
+
+        Vector3 position =
+            new Vector3(
+                flatPosition.x,
+                ResolveClientWaterY(
+                    flatPosition,
+                    transform.position.y,
+                    false
+                ),
+                flatPosition.z
+            );
+
+        Quaternion rotation =
+            Quaternion.Euler(
+                0f,
+                mainYaw +
+                clientSmoothedRelativeYaw,
+                0f
+            );
+
+        transform.SetPositionAndRotation(
+            position,
+            rotation
+        );
+
+        if (Body != null)
+        {
+            Body.position = position;
+            Body.rotation = rotation;
+        }
+
+        AlignClientWavePivot();
+        Physics.SyncTransforms();
     }
 
     public void NotifyBlockChanged()
@@ -2497,6 +2720,23 @@ public class SecondaryRaftRoot : MonoBehaviour
     private void OnWorldShift(
         Vector3 shift)
     {
+        Debug.Log(
+            "[RebuildableRaft][NetDiag] role=" +
+            (Raft_Network.IsHost ? "HOST" : "CLIENT") +
+            " event=WORLD_SHIFT raft=" +
+            RaftId +
+            " shift=" +
+            FormatVector3(shift) +
+            " raftBefore=" +
+            FormatVector3(transform.position) +
+            " mainBefore=" +
+            FormatVector3(
+                MultiRaftRegistry.MainPivot != null
+                    ? MultiRaftRegistry.MainPivot.position
+                    : Vector3.zero
+            )
+        );
+
         transform.position -=
             shift;
 
@@ -2514,6 +2754,601 @@ public class SecondaryRaftRoot : MonoBehaviour
             networkPosition -=
                 shift;
         }
+    }
+
+    internal uint NextNetworkDebugSequence()
+    {
+        debugNextSequence++;
+
+        if (debugNextSequence == 0U)
+        {
+            debugNextSequence = 1U;
+        }
+
+        return debugNextSequence;
+    }
+
+    internal string BuildPacketDiagnosticLine(
+        string action,
+        Message_SecondaryRaftState state)
+    {
+        Transform mainPivot =
+            GetMainNetworkAnchor();
+
+        Vector3 currentRelative =
+            GetFlatRelativePosition(
+                mainPivot,
+                transform.position
+            );
+
+        Vector3 targetWorld =
+            GetFlatTargetWorld(
+                state,
+                mainPivot
+            );
+
+        float worldError =
+            DistanceXZ(
+                transform.position,
+                targetWorld
+            );
+
+        return
+            "[RebuildableRaft][NetDiagPacket] role=" +
+            (Raft_Network.IsHost ? "HOST" : "CLIENT") +
+            " action=" + action +
+            " raft=" + RaftId +
+            " seq=" + state.debugSequence +
+            " hostFrame=" + state.debugHostFrame +
+            " rel=" +
+            FormatXZYaw(
+                new Vector3(
+                    state.x,
+                    0f,
+                    state.z
+                ),
+                state.yaw
+            ) +
+            " currentRel=" +
+            FormatXZYaw(
+                currentRelative,
+                GetRelativeYaw(mainPivot)
+            ) +
+            " main=" +
+            FormatVector3(
+                mainPivot != null
+                    ? mainPivot.position
+                    : Vector3.zero
+            ) +
+            " anchorYaw=" +
+            (mainPivot != null ? mainPivot.eulerAngles.y : 0f)
+                .ToString("F2", CultureInfo.InvariantCulture) +
+            " lockedYaw=" +
+            (MultiRaftRegistry.MainPivot != null
+                ? MultiRaftRegistry.MainPivot.eulerAngles.y
+                : 0f).ToString("F2", CultureInfo.InvariantCulture) +
+            " raftWorld=" +
+            FormatVector3(transform.position) +
+            " targetWorld=" +
+            FormatVector3(targetWorld) +
+            " errXZ=" +
+            worldError.ToString("F3", CultureInfo.InvariantCulture);
+    }
+
+    internal string BuildPeriodicDiagnosticLine()
+    {
+        Transform mainPivot =
+            MultiRaftRegistry.MainPivot;
+
+        Transform mainAnchor =
+            GetMainNetworkAnchor();
+
+        Raft mainRaft =
+            ComponentManager<Raft>.Value;
+
+        Vector3 mainRootPosition =
+            mainRaft != null
+                ? mainRaft.transform.position
+                : Vector3.zero;
+
+        Rigidbody mainBody =
+            mainRaft != null &&
+            MainRaftBodyField != null
+                ? MainRaftBodyField.GetValue(
+                    mainRaft
+                ) as Rigidbody
+                : null;
+
+        Vector3 mainBodyPosition =
+            mainBody != null
+                ? mainBody.position
+                : Vector3.zero;
+
+        Vector3 mainVelocity =
+            mainBody != null
+                ? mainBody.velocity
+                : Vector3.zero;
+
+        Vector3 mainNetworkPosition =
+            Vector3.zero;
+
+        float mainNetworkYaw = 0f;
+        float mainNetworkVelocity = 0f;
+
+        if (mainRaft != null)
+        {
+            if (MainRaftNetworkPositionField != null)
+            {
+                object value =
+                    MainRaftNetworkPositionField.GetValue(
+                        mainRaft
+                    );
+
+                if (value is Vector3)
+                {
+                    mainNetworkPosition =
+                        (Vector3)value;
+                }
+            }
+
+            if (MainRaftNetworkYawField != null)
+            {
+                object value =
+                    MainRaftNetworkYawField.GetValue(
+                        mainRaft
+                    );
+
+                if (value is float)
+                {
+                    mainNetworkYaw =
+                        (float)value;
+                }
+            }
+
+            if (MainRaftNetworkVelocityField != null)
+            {
+                object value =
+                    MainRaftNetworkVelocityField.GetValue(
+                        mainRaft
+                    );
+
+                if (value is float)
+                {
+                    mainNetworkVelocity =
+                        (float)value;
+                }
+            }
+        }
+
+        Vector3 currentRelative =
+            GetFlatRelativePosition(
+                mainAnchor,
+                transform.position
+            );
+
+        Vector3 desiredRelative =
+            Raft_Network.IsHost
+                ? currentRelative
+                : new Vector3(
+                    networkPosition.x,
+                    0f,
+                    networkPosition.z
+                );
+
+        Vector3 targetWorld =
+            GetFlatTargetWorld(
+                desiredRelative,
+                networkYaw,
+                networkStateRelativeToMain,
+                mainAnchor
+            );
+
+        float relativeError =
+            DistanceXZ(
+                currentRelative,
+                desiredRelative
+            );
+
+        float worldError =
+            DistanceXZ(
+                transform.position,
+                targetWorld
+            );
+
+        float receiveAge =
+            debugLastReceiveTime > 0f
+                ? Time.time -
+                    debugLastReceiveTime
+                : -1f;
+
+        Network_Player player =
+            ComponentManager<Network_Player>.Value;
+
+        string playerInfo =
+            BuildLocalPlayerDiagnostic(
+                player,
+                mainPivot
+            );
+
+        int received =
+            debugReceivedSinceLog;
+
+        int missing =
+            debugMissingSinceLog;
+
+        int outOfOrder =
+            debugOutOfOrderSinceLog;
+
+        debugReceivedSinceLog = 0;
+        debugMissingSinceLog = 0;
+        debugOutOfOrderSinceLog = 0;
+
+        return
+            "[RebuildableRaft][NetDiag] role=" +
+            (Raft_Network.IsHost ? "HOST" : "CLIENT") +
+            " raft=" + RaftId +
+            " seq=" +
+            (Raft_Network.IsHost
+                ? debugNextSequence
+                : debugLastReceivedSequence) +
+            " rx=" + received +
+            " miss=" + missing +
+            " ooo=" + outOfOrder +
+            " age=" +
+            receiveAge.ToString("F3", CultureInfo.InvariantCulture) +
+            " mainPivot=" +
+            FormatVector3(
+                mainPivot != null
+                    ? mainPivot.position
+                    : Vector3.zero
+            ) +
+            " mainRoot=" +
+            FormatVector3(mainRootPosition) +
+            " pivotYaw=" +
+            (mainPivot != null ? mainPivot.eulerAngles.y : 0f)
+                .ToString("F2", CultureInfo.InvariantCulture) +
+            " rootYaw=" +
+            (mainRaft != null ? mainRaft.transform.eulerAngles.y : 0f)
+                .ToString("F2", CultureInfo.InvariantCulture) +
+            " mainBody=" +
+            FormatVector3(mainBodyPosition) +
+            " mainV=" +
+            FormatVector3(mainVelocity) +
+            " mainNet=" +
+            FormatXZYaw(
+                mainNetworkPosition,
+                mainNetworkYaw
+            ) +
+            " mainNetV=" +
+            mainNetworkVelocity.ToString("F3", CultureInfo.InvariantCulture) +
+            " raft=" +
+            FormatVector3(transform.position) +
+            " raftBody=" +
+            FormatVector3(
+                Body != null
+                    ? Body.position
+                    : Vector3.zero
+            ) +
+            " raftV=" +
+            FormatVector3(
+                Body != null
+                    ? Body.velocity
+                    : Vector3.zero
+            ) +
+            " actualRel=" +
+            FormatXZYaw(
+                currentRelative,
+                GetRelativeYaw(mainAnchor)
+            ) +
+            " netRel=" +
+            FormatXZYaw(
+                desiredRelative,
+                networkYaw
+            ) +
+            " relErr=" +
+            relativeError.ToString("F3", CultureInfo.InvariantCulture) +
+            " worldErr=" +
+            worldError.ToString("F3", CultureInfo.InvariantCulture) +
+            " " + playerInfo +
+            " " + BuildVisualHierarchyDiagnosticLine();
+    }
+
+    private string BuildVisualHierarchyDiagnosticLine()
+    {
+        Transform mainPivot = MultiRaftRegistry.MainPivot;
+        Transform mainAnchor = GetMainNetworkAnchor();
+
+        Block mainBlock = null;
+        List<Block> placedBlocks = BlockCreator.GetPlacedBlocks();
+        if (placedBlocks != null && mainPivot != null)
+        {
+            for (int i = 0; i < placedBlocks.Count; i++)
+            {
+                Block candidate = placedBlocks[i];
+                if (candidate == null ||
+                    candidate.transform == null ||
+                    !candidate.transform.IsChildOf(mainPivot) ||
+                    MultiRaftRegistry.GetRootFromBlock(candidate) != null)
+                {
+                    continue;
+                }
+
+                if (mainBlock == null ||
+                    candidate.ObjectIndex < mainBlock.ObjectIndex)
+                {
+                    mainBlock = candidate;
+                }
+            }
+        }
+
+        Block secondaryBlock = null;
+        if (blocks != null)
+        {
+            for (int i = 0; i < blocks.Length; i++)
+            {
+                Block candidate = blocks[i];
+                if (candidate == null || candidate.transform == null)
+                {
+                    continue;
+                }
+
+                if (secondaryBlock == null ||
+                    candidate.ObjectIndex < secondaryBlock.ObjectIndex)
+                {
+                    secondaryBlock = candidate;
+                }
+            }
+        }
+
+        Quaternion mainRelativeRotation =
+            mainPivot != null && mainAnchor != null
+                ? Quaternion.Inverse(mainAnchor.rotation) * mainPivot.rotation
+                : Quaternion.identity;
+
+        string mainBlockInfo = mainBlock != null
+            ? "id=" + mainBlock.ObjectIndex +
+              ",world=" + FormatVector3(mainBlock.transform.position) +
+              ",localToMain=" + FormatVector3(mainPivot.InverseTransformPoint(mainBlock.transform.position)) +
+              ",localToRoot=" + FormatVector3(mainAnchor != null
+                  ? mainAnchor.InverseTransformPoint(mainBlock.transform.position)
+                  : Vector3.zero) +
+              ",yaw=" + mainBlock.transform.eulerAngles.y.ToString("F2", CultureInfo.InvariantCulture)
+            : "none";
+
+        string secondaryBlockInfo = secondaryBlock != null
+            ? "id=" + secondaryBlock.ObjectIndex +
+              ",world=" + FormatVector3(secondaryBlock.transform.position) +
+              ",localToRoot=" + FormatVector3(transform.InverseTransformPoint(secondaryBlock.transform.position)) +
+              ",localToWave=" + FormatVector3(wavePivot != null
+                  ? wavePivot.InverseTransformPoint(secondaryBlock.transform.position)
+                  : Vector3.zero) +
+              ",yaw=" + secondaryBlock.transform.eulerAngles.y.ToString("F2", CultureInfo.InvariantCulture)
+            : "none";
+
+        return "[RebuildableRaft][VisualDiag] role=" +
+            (Raft_Network.IsHost ? "HOST" : "CLIENT") +
+            " raft=" + RaftId +
+            " frame=" + Time.frameCount +
+            " realtime=" + Time.realtimeSinceStartup.ToString("F2", CultureInfo.InvariantCulture) +
+            " rootWorld=" + FormatVector3(transform.position) +
+            " rootEuler=" + FormatVector3(transform.eulerAngles) +
+            " mainRootWorld=" + FormatVector3(mainAnchor != null ? mainAnchor.position : Vector3.zero) +
+            " mainPivotWorld=" + FormatVector3(mainPivot != null ? mainPivot.position : Vector3.zero) +
+            " mainPivotEuler=" + FormatVector3(mainPivot != null ? mainPivot.eulerAngles : Vector3.zero) +
+            " mainPivotLocalEuler=" + FormatVector3(mainRelativeRotation.eulerAngles) +
+            " waveWorld=" + FormatVector3(wavePivot != null ? wavePivot.position : Vector3.zero) +
+            " waveLocalPosition=" + FormatVector3(wavePivot != null ? wavePivot.localPosition : Vector3.zero) +
+            " waveLocalEuler=" + FormatVector3(wavePivot != null ? wavePivot.localEulerAngles : Vector3.zero) +
+            " waveWorldEuler=" + FormatVector3(wavePivot != null ? wavePivot.eulerAngles : Vector3.zero) +
+            " rootInterpolation=" + (Body != null ? Body.interpolation.ToString() : "none") +
+            " waveInterpolation=" + (collisionBody != null ? collisionBody.interpolation.ToString() : "none") +
+            " mainBlock={" + mainBlockInfo + "}" +
+            " secondaryBlock={" + secondaryBlockInfo + "}";
+    }
+
+    private string BuildLocalPlayerDiagnostic(
+        Network_Player player,
+        Transform mainPivot)
+    {
+        if (player == null ||
+            !player.IsLocalPlayer)
+        {
+            return "player=-";
+        }
+
+        Transform parent =
+            player.transform.parent;
+
+        SecondaryRaftRoot parentRoot =
+            MultiRaftRegistry.GetRootFromTransform(
+                parent
+            );
+
+        SecondaryRaftRoot groundRoot =
+            MultiRaftRegistry.FindRootAtGroundPoint(
+                player.FeetPosition
+            );
+
+        string parentName;
+
+        if (parentRoot != null)
+        {
+            parentName =
+                "secondary:" +
+                parentRoot.RaftId;
+        }
+        else if (parent != null &&
+                 mainPivot != null &&
+                 (parent == mainPivot ||
+                  parent.IsChildOf(mainPivot)))
+        {
+            parentName = "main";
+        }
+        else if (parent == null)
+        {
+            parentName = "none";
+        }
+        else
+        {
+            parentName =
+                "other:" +
+                parent.name;
+        }
+
+        return
+            "playerParent=" +
+            parentName +
+            " ground=" +
+            (groundRoot != null
+                ? groundRoot.RaftId.ToString()
+                : "-") +
+            " playerWorld=" +
+            FormatVector3(player.transform.position) +
+            " playerLocal=" +
+            FormatVector3(player.transform.localPosition) +
+            " ctrl=" +
+            (player.PersonController != null
+                ? player.PersonController.controllerType.ToString()
+                : "-");
+    }
+
+    private static Vector3 GetFlatTargetWorld(
+        Message_SecondaryRaftState state,
+        Transform mainPivot)
+    {
+        if (state == null)
+        {
+            return Vector3.zero;
+        }
+
+        return GetFlatTargetWorld(
+            new Vector3(
+                state.x,
+                0f,
+                state.z
+            ),
+            state.yaw,
+            state.relativeToMain,
+            mainPivot
+        );
+    }
+
+    private static Vector3 GetFlatTargetWorld(
+        Vector3 statePosition,
+        float stateYaw,
+        bool relativeToMain,
+        Transform mainPivot)
+    {
+        if (!relativeToMain ||
+            mainPivot == null)
+        {
+            return statePosition;
+        }
+
+        Quaternion mainYawRotation =
+            Quaternion.Euler(
+                0f,
+                mainPivot.eulerAngles.y,
+                0f
+            );
+
+        Vector3 position =
+            mainPivot.position +
+            mainYawRotation *
+            new Vector3(
+                statePosition.x,
+                0f,
+                statePosition.z
+            );
+
+        position.y = 0f;
+        return position;
+    }
+
+    private static Vector3 GetFlatRelativePosition(
+        Transform mainPivot,
+        Vector3 worldPosition)
+    {
+        if (mainPivot == null)
+        {
+            return new Vector3(
+                worldPosition.x,
+                0f,
+                worldPosition.z
+            );
+        }
+
+        Quaternion inverseMainYaw =
+            Quaternion.Euler(
+                0f,
+                -mainPivot.eulerAngles.y,
+                0f
+            );
+
+        Vector3 delta =
+            worldPosition -
+            mainPivot.position;
+
+        return inverseMainYaw *
+            new Vector3(
+                delta.x,
+                0f,
+                delta.z
+            );
+    }
+
+    private float GetRelativeYaw(
+        Transform mainPivot)
+    {
+        if (mainPivot == null)
+        {
+            return transform.eulerAngles.y;
+        }
+
+        return Mathf.DeltaAngle(
+            mainPivot.eulerAngles.y,
+            transform.eulerAngles.y
+        );
+    }
+
+    private static float DistanceXZ(
+        Vector3 a,
+        Vector3 b)
+    {
+        float dx = a.x - b.x;
+        float dz = a.z - b.z;
+
+        return Mathf.Sqrt(
+            dx * dx +
+            dz * dz
+        );
+    }
+
+    private static string FormatVector3(
+        Vector3 value)
+    {
+        return
+            "(x=" +
+            value.x.ToString("F3", CultureInfo.InvariantCulture) +
+            ",y=" +
+            value.y.ToString("F3", CultureInfo.InvariantCulture) +
+            ",z=" +
+            value.z.ToString("F3", CultureInfo.InvariantCulture) +
+            ")";
+    }
+
+    private static string FormatXZYaw(
+        Vector3 position,
+        float yaw)
+    {
+        return
+            "(x=" +
+            position.x.ToString("F3", CultureInfo.InvariantCulture) +
+            ",z=" +
+            position.z.ToString("F3", CultureInfo.InvariantCulture) +
+            ",yaw=" +
+            yaw.ToString("F2", CultureInfo.InvariantCulture) +
+            ")";
     }
 
     public Message_SecondaryRaftState
@@ -2540,21 +3375,45 @@ public class SecondaryRaftRoot : MonoBehaviour
         }
 
         Transform mainPivot =
-            MultiRaftRegistry.MainPivot;
+            GetMainNetworkAnchor();
 
         if (mainPivot == null)
         {
             return;
         }
 
+        float mainYaw =
+            mainPivot.eulerAngles.y;
+
+        Quaternion mainYawRotation =
+            Quaternion.Euler(
+                0f,
+                mainYaw,
+                0f
+            );
+
+        Vector3 flatPosition =
+            mainPivot.position +
+            mainYawRotation *
+            new Vector3(
+                networkPosition.x,
+                0f,
+                networkPosition.z
+            );
+
         targetPosition =
-            mainPivot.TransformPoint(
-                networkPosition
+            new Vector3(
+                flatPosition.x,
+                ResolveClientWaterY(
+                    flatPosition,
+                    transform.position.y,
+                    true
+                ),
+                flatPosition.z
             );
 
         targetYaw =
-            mainPivot.eulerAngles.y +
-            networkYaw;
+            mainYaw + networkYaw;
     }
 
     public void ApplyNetworkState(
@@ -2564,6 +3423,43 @@ public class SecondaryRaftRoot : MonoBehaviour
         {
             return;
         }
+
+        if (!Raft_Network.IsHost)
+        {
+            if (debugLastReceivedSequence != 0U)
+            {
+                if (state.debugSequence >
+                    debugLastReceivedSequence + 1U)
+                {
+                    debugMissingSinceLog +=
+                        (int)(
+                            state.debugSequence -
+                            debugLastReceivedSequence -
+                            1U
+                        );
+                }
+                else if (state.debugSequence <=
+                         debugLastReceivedSequence)
+                {
+                    debugOutOfOrderSinceLog++;
+                }
+            }
+
+            if (state.debugSequence >
+                debugLastReceivedSequence)
+            {
+                debugLastReceivedSequence =
+                    state.debugSequence;
+            }
+
+            debugLastReceiveTime =
+                Time.time;
+
+            debugReceivedSinceLog++;
+        }
+
+        bool previousRelativeState =
+            networkStateRelativeToMain;
 
         networkPosition =
             new Vector3(
@@ -2600,6 +3496,31 @@ public class SecondaryRaftRoot : MonoBehaviour
         hasNetworkState =
             true;
 
+        if (!Raft_Network.IsHost &&
+            networkStateRelativeToMain &&
+            (firstState ||
+             !previousRelativeState ||
+             !clientRelativePoseInitialized))
+        {
+            clientSmoothedRelativePosition =
+                new Vector3(
+                    networkPosition.x,
+                    0f,
+                    networkPosition.z
+                );
+
+            clientSmoothedRelativeYaw =
+                networkYaw;
+
+            clientRelativePoseInitialized =
+                true;
+        }
+        else if (!networkStateRelativeToMain)
+        {
+            clientRelativePoseInitialized =
+                false;
+        }
+
         if (firstState &&
             !Raft_Network.IsHost)
         {
@@ -2610,6 +3531,16 @@ public class SecondaryRaftRoot : MonoBehaviour
                 out targetPosition,
                 out targetYaw
             );
+
+            if (!networkStateRelativeToMain)
+            {
+                targetPosition.y =
+                    ResolveClientWaterY(
+                        targetPosition,
+                        transform.position.y,
+                        true
+                    );
+            }
 
             Quaternion targetRotation =
                 Quaternion.Euler(
@@ -2641,7 +3572,7 @@ public class SecondaryRaftRoot : MonoBehaviour
                     true;
             }
 
-            ApplyNetworkWaveTilt();
+            PrepareWavePoseForFrame();
 
             previousCarryPosition =
                 BuildPivot.position;
