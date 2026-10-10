@@ -34,6 +34,9 @@ public static class BlockCreator_Update_RebuildableRaft
     private const float PreviewDistance = 2.25f;
     private const float PreviewFollowSpeed = 14f;
     private const float FoundationSurfaceOffset = 0.4f;
+    private const float FoundationCellSize = 1.5f;
+    private const float FoundationSnapDistance = 0.9f;
+    private const float NewRaftClearance = 2.85f;
 
     private static bool previewPositionInitialized;
     private static Vector3 previewWorldPosition;
@@ -165,6 +168,13 @@ public static class BlockCreator_Update_RebuildableRaft
             ___selectedBuildablePrefab
         );
 
+        if (IsAimingAtPlacedFoundation(___playerNetwork))
+        {
+            __instance.SetGhostBlockVisibility(false);
+            ResetPreviewState();
+            return false;
+        }
+
         Vector3 worldPosition;
 
         if (!TryGetBuildPosition(
@@ -181,26 +191,54 @@ public static class BlockCreator_Update_RebuildableRaft
             return false;
         }
 
-        ghost.transform.position =
-            worldPosition;
+        if (IsInsidePlacedFoundation(worldPosition, BlockCreator.GetPlacedBlocks()))
+        {
+            __instance.SetGhostBlockVisibility(false);
+            ResetPreviewState();
+            return false;
+        }
+
+        Transform adjacentPivot;
+        SecondaryRaftRoot adjacentRoot;
+        Vector3 adjacentPosition;
+        bool nearExistingRaft;
+
+        bool attachToExisting = TryFindAdjacentFoundation(
+            worldPosition,
+            out adjacentPivot,
+            out adjacentRoot,
+            out adjacentPosition,
+            out nearExistingRaft
+        );
+
+        if (attachToExisting)
+        {
+            targetPivot = adjacentPivot;
+            worldPosition = adjacentPosition;
+            MultiRaftRegistry.SetBuildPivot(targetPivot);
+
+            if (ghost.transform.parent != targetPivot)
+                ghost.transform.SetParent(targetPivot, true);
+        }
+
+        ghost.transform.position = worldPosition;
 
         float gridYaw =
-            mainPivot.eulerAngles.y +
-            ___selectedBuildablePrefab
-                .currentRotationY;
+            targetPivot.eulerAngles.y +
+            ___selectedBuildablePrefab.currentRotationY;
 
-        ghost.transform.rotation =
-            Quaternion.Euler(
-                0f,
-                gridYaw,
-                0f
-            );
+        ghost.transform.rotation = attachToExisting
+            ? targetPivot.rotation * Quaternion.Euler(
+                0f, ___selectedBuildablePrefab.currentRotationY, 0f)
+            : Quaternion.Euler(0f, gridYaw, 0f);
 
+        Physics.SyncTransforms();
         __instance.SetGhostBlockVisibility(
             true
         );
 
         bool canBuild =
+            (attachToExisting || !nearExistingRaft) &&
             ghost.IsOverlapping() ==
                 OverlappType.None &&
             __instance.HasEnoughResourcesToBuild(
@@ -215,14 +253,28 @@ public static class BlockCreator_Update_RebuildableRaft
         if (canBuild &&
             MyInput.GetButtonDown("LMB"))
         {
-            PlaceFoundation(
-                __instance,
-                ___playerNetwork,
-                item,
-                ghost,
-                ___selectedBuildablePrefab
-                    .currentRotationY
-            );
+            if (attachToExisting)
+            {
+                PlaceAttachedFoundation(
+                    __instance,
+                    ___playerNetwork,
+                    item,
+                    ghost,
+                    ___selectedBuildablePrefab.currentRotationY,
+                    adjacentPivot,
+                    adjacentRoot
+                );
+            }
+            else
+            {
+                PlaceFoundation(
+                    __instance,
+                    ___playerNetwork,
+                    item,
+                    ghost,
+                    ___selectedBuildablePrefab.currentRotationY
+                );
+            }
         }
 
         return false;
@@ -335,6 +387,158 @@ public static class BlockCreator_Update_RebuildableRaft
             previewWorldPosition;
 
         return true;
+    }
+
+    private static bool IsAimingAtPlacedFoundation(Network_Player player)
+    {
+        if (player == null || player.CameraTransform == null)
+            return false;
+
+        RaycastHit[] hits = Physics.RaycastAll(
+            player.CameraTransform.position,
+            player.CameraTransform.forward,
+            Player.UseDistance * 2f,
+            LayerMasks.MASK_Block | LayerMasks.MASK_GroundMask_Raft,
+            QueryTriggerInteraction.Ignore);
+
+        float nearestDistance = float.MaxValue;
+        Block nearestBlock = null;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            RaycastHit hit = hits[i];
+            if (hit.collider == null || hit.distance >= nearestDistance)
+                continue;
+
+            Block block = hit.collider.GetComponentInParent<Block>();
+            if (block == null || !block.hasBeenPlaced ||
+                !block.gameObject.activeInHierarchy)
+                continue;
+
+            nearestBlock = block;
+            nearestDistance = hit.distance;
+        }
+
+        return nearestBlock != null && nearestBlock.buildableItem != null &&
+            Block.IsBlockIndexFoundation(nearestBlock.buildableItem.UniqueIndex);
+    }
+
+    private static bool IsInsidePlacedFoundation(Vector3 position, List<Block> placedBlocks)
+    {
+        if (placedBlocks == null)
+            return false;
+
+        for (int i = 0; i < placedBlocks.Count; i++)
+        {
+            Block block = placedBlocks[i];
+            if (block == null || block.buildableItem == null ||
+                !block.hasBeenPlaced || !block.gameObject.activeInHierarchy ||
+                !Block.IsBlockIndexFoundation(block.buildableItem.UniqueIndex))
+                continue;
+
+            Vector3 center = block.transform.position;
+            if (Mathf.Abs(center.x - position.x) > 1.1f ||
+                Mathf.Abs(center.z - position.z) > 1.1f ||
+                Mathf.Abs(center.y - position.y) > 1.3f)
+                continue;
+
+            Vector3 local = block.transform.InverseTransformPoint(position);
+            if (Mathf.Abs(local.x) < 0.68f &&
+                Mathf.Abs(local.z) < 0.68f &&
+                Mathf.Abs(local.y) < 1.3f)
+                return true;
+        }
+
+        return false;
+    }
+
+    internal static bool IsNearExistingRaft(Vector3 targetWorld)
+    {
+        Transform pivot;
+        SecondaryRaftRoot root;
+        Vector3 snapped;
+        bool nearby;
+        TryFindAdjacentFoundation(
+            targetWorld, out pivot, out root, out snapped, out nearby);
+        return nearby;
+    }
+
+    private static bool TryFindAdjacentFoundation(
+        Vector3 targetWorld,
+        out Transform targetPivot,
+        out SecondaryRaftRoot targetRoot,
+        out Vector3 snappedWorld,
+        out bool nearExistingRaft)
+    {
+        targetPivot = null;
+        targetRoot = null;
+        snappedWorld = targetWorld;
+        nearExistingRaft = false;
+
+        Transform mainPivot = MultiRaftRegistry.MainPivot;
+        List<Block> placedBlocks = BlockCreator.GetPlacedBlocks();
+        if (mainPivot == null || placedBlocks == null)
+            return false;
+
+        float bestDistanceSquared =
+            FoundationSnapDistance * FoundationSnapDistance;
+        float clearanceSquared = NewRaftClearance * NewRaftClearance;
+        bool found = false;
+
+        for (int i = 0; i < placedBlocks.Count; i++)
+        {
+            Block block = placedBlocks[i];
+            if (block == null || block.buildableItem == null ||
+                !block.hasBeenPlaced || !block.gameObject.activeInHierarchy ||
+                !Block.IsBlockIndexFoundation(block.buildableItem.UniqueIndex))
+                continue;
+
+            Vector3 center = block.transform.position;
+            float dx = targetWorld.x - center.x;
+            float dz = targetWorld.z - center.z;
+            float distanceFromCenter = dx * dx + dz * dz;
+            float searchRadius = Mathf.Max(NewRaftClearance,
+                FoundationCellSize + FoundationSnapDistance);
+            if (distanceFromCenter > searchRadius * searchRadius)
+                continue;
+
+            SecondaryRaftRoot root = MultiRaftRegistry.GetRootFromBlock(block);
+            Transform pivot = root != null ? root.BuildPivot : mainPivot;
+
+            if (root == null && !block.transform.IsChildOf(mainPivot))
+                continue;
+
+            if (distanceFromCenter <= clearanceSquared)
+                nearExistingRaft = true;
+
+            Vector3 centerLocal = pivot.InverseTransformPoint(center);
+            for (int direction = 0; direction < 4; direction++)
+            {
+                Vector3 offset;
+                switch (direction)
+                {
+                    case 0: offset = new Vector3(FoundationCellSize, 0f, 0f); break;
+                    case 1: offset = new Vector3(-FoundationCellSize, 0f, 0f); break;
+                    case 2: offset = new Vector3(0f, 0f, FoundationCellSize); break;
+                    default: offset = new Vector3(0f, 0f, -FoundationCellSize); break;
+                }
+
+                Vector3 candidate = pivot.TransformPoint(centerLocal + offset);
+                float cx = targetWorld.x - candidate.x;
+                float cz = targetWorld.z - candidate.z;
+                float distanceSquared = cx * cx + cz * cz;
+                if (distanceSquared > bestDistanceSquared ||
+                    IsInsidePlacedFoundation(candidate, placedBlocks))
+                    continue;
+
+                bestDistanceSquared = distanceSquared;
+                targetPivot = pivot;
+                targetRoot = root;
+                snappedWorld = candidate;
+                found = true;
+            }
+        }
+
+        return found;
     }
 
     private static void ResetPreviewState()
@@ -459,6 +663,111 @@ public static class BlockCreator_Update_RebuildableRaft
         }
     }
 
+    private static void PlaceAttachedFoundation(
+        BlockCreator creator,
+        Network_Player player,
+        Item_Base item,
+        Block ghost,
+        float gridRotationY,
+        Transform pivot,
+        SecondaryRaftRoot root)
+    {
+        if (pivot == null || player == null || player.Inventory == null)
+            return;
+
+        int hotSlotIndex = player.Inventory.hotbar.GetSelectedSlotIndex();
+        Vector3 localPosition = pivot.InverseTransformPoint(ghost.transform.position);
+        BlockCreator.SnapBuildPosition(ref localPosition);
+        Vector3 localEuler = NormalizeLocalEuler(ghost, gridRotationY);
+
+        if (Raft_Network.IsHost)
+        {
+            Transform previousPivot = MultiRaftRegistry.CurrentBuildPivot;
+            try
+            {
+                MultiRaftRegistry.SetBuildPivot(pivot);
+
+                uint blockObjectIndex = SaveAndLoad.GetUniqueObjectIndex();
+                uint networkedObjectIndex = ghost.networkedBehaviour != null
+                    ? SaveAndLoad.GetUniqueObjectIndex() : 0U;
+                uint networkedBehaviourIndex = ghost.networkedBehaviour != null
+                    ? NetworkUpdateManager.GetUniqueBehaviourIndex() : 0U;
+
+                Message_BlockCreator_PlaceBlock message =
+                    new Message_BlockCreator_PlaceBlock(
+                        Messages.BlockCreator_PlaceBlock,
+                        creator,
+                        item.UniqueIndex,
+                        blockObjectIndex,
+                        networkedObjectIndex,
+                        networkedBehaviourIndex,
+                        localPosition,
+                        localEuler,
+                        -1,
+                        DPS.Default
+                    );
+
+                if (root != null)
+                {
+                    message.hotSlotIndex = MultiRaftRegistry.EncodeHotSlot(
+                        root.RaftId, -1, false);
+                }
+
+                player.Network.RPC(
+                    message,
+                    Target.Other,
+                    EP2PSend.k_EP2PSendReliable,
+                    NetworkChannel.Channel_Game
+                );
+
+                creator.CreateBlock(
+                    item,
+                    localPosition,
+                    localEuler,
+                    DPS.Default,
+                    hotSlotIndex,
+                    false,
+                    blockObjectIndex,
+                    networkedObjectIndex,
+                    networkedBehaviourIndex
+                );
+            }
+            finally
+            {
+                MultiRaftRegistry.SetBuildPivot(
+                    previousPivot != null ? previousPivot : MultiRaftRegistry.MainPivot);
+            }
+        }
+        else
+        {
+            Message_BlockCreator_PlaceBlock message =
+                new Message_BlockCreator_PlaceBlock(
+                    Messages.BlockCreator_PlaceBlock,
+                    creator,
+                    item.UniqueIndex,
+                    0U,
+                    0U,
+                    0U,
+                    localPosition,
+                    localEuler,
+                    hotSlotIndex,
+                    DPS.Default
+                );
+
+            if (root != null)
+            {
+                message.hotSlotIndex = MultiRaftRegistry.EncodeHotSlot(
+                    root.RaftId, hotSlotIndex, false);
+            }
+
+            player.SendP2P(
+                message,
+                EP2PSend.k_EP2PSendReliable,
+                NetworkChannel.Channel_Game
+            );
+        }
+    }
+
     private static void PlaceFoundation(
         BlockCreator creator,
         Network_Player player,
@@ -466,8 +775,18 @@ public static class BlockCreator_Update_RebuildableRaft
         Block ghost,
         float gridRotationY)
     {
-        if (!MultiRaftRegistry
-                .HasPrimaryBlocks())
+        bool hasSecondaryRafts = false;
+        foreach (SecondaryRaftRoot candidate in MultiRaftRegistry.GetRoots())
+        {
+            if (candidate != null && candidate.HasPlacedBlocks)
+            {
+                hasSecondaryRafts = true;
+                break;
+            }
+        }
+
+        // Основной плот создаётся заново только в полностью пустом мире
+        if (!MultiRaftRegistry.HasPrimaryBlocks() && !hasSecondaryRafts)
         {
             PlacePrimaryFoundation(
                 creator,
@@ -885,9 +1204,7 @@ public static class BlockCreator_Update_RebuildableRaft
                 correction;
         }
 
-        Debug.Log(
-            "[RebuildableRaft] Primary raft rebuilt"
-        );
+
     }
 }
 
@@ -1276,6 +1593,14 @@ public static class BlockCreator_Deserialize_RebuildableRaft
                 state.encodedRootPosition =
                     place.LocalPosition;
 
+                if (Raft_Network.IsHost && raftId == 0 &&
+                    BlockCreator_Update_RebuildableRaft.IsNearExistingRaft(
+                        state.encodedRootPosition))
+                {
+                    __result = false;
+                    return false;
+                }
+
                 if (Raft_Network.IsHost &&
                     raftId == 0)
                 {
@@ -1318,11 +1643,6 @@ public static class BlockCreator_Deserialize_RebuildableRaft
 
             if (root == null)
             {
-                Debug.LogWarning(
-                    "[RebuildableRaft] Missing secondary raft " +
-                    raftId
-                );
-
                 __result = false;
                 return false;
             }

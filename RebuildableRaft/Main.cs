@@ -1,5 +1,6 @@
 using HarmonyLib;
 using HMLLibrary;
+using RaftModLoader;
 using Steamworks;
 using System;
 using System.Collections.Generic;
@@ -23,8 +24,6 @@ public class RebuildableRaft : Mod
     private static int appliedStates;
     private static int unknownRafts;
     private static int obsoleteStates;
-    private static float nextStatusLogTime;
-    private static float nextWarningTime;
 
     private const float NetworkSyncInterval = 0.05f;
     private const float RaftNameSyncInterval = 2f;
@@ -32,6 +31,12 @@ public class RebuildableRaft : Mod
     private Harmony harmony;
     private float networkSyncTimer;
     private float raftNameSyncTimer;
+
+    [ConsoleCommand("rafttp", "Teleport to a numbered raft. Syntax: rafttp [number]")]
+    public static string TeleportToRaftCommand(string[] args)
+    {
+        return PlayerRaftPersistence.TeleportToRaft(args);
+    }
 
     public void Awake()
     {
@@ -43,17 +48,16 @@ public class RebuildableRaft : Mod
         appliedStates = 0;
         unknownRafts = 0;
         obsoleteStates = 0;
-        nextStatusLogTime = Time.realtimeSinceStartup + 5f;
-        nextWarningTime = 0f;
 
         SubscribeToNetworkChannel(MultiRaftNetworkChannel);
         MultiRaftRegistry.Reset();
         RaftNameRegistry.Reset();
+        PlayerRaftPersistence.Reset();
 
         harmony = new Harmony("el.rebuildableraft.multiraft");
         harmony.PatchAll();
 
-        Debug.Log("[RebuildableRaft] Loaded");
+
     }
 
     public void Update()
@@ -64,24 +68,7 @@ public class RebuildableRaft : Mod
         }
 
         RaftRenameWindow.Update();
-
-        if (Time.realtimeSinceStartup >= nextStatusLogTime)
-        {
-            nextStatusLogTime = Time.realtimeSinceStartup + 5f;
-            Debug.Log("[RebuildableRaft][NetChannel] role=" +
-                (Raft_Network.IsHost ? "HOST" : "CLIENT") +
-                " sent=" + sentStates +
-                " recv=" + receivedStates +
-                " applied=" + appliedStates +
-                " missingRoot=" + unknownRafts +
-                " stale=" + obsoleteStates);
-
-            foreach (SecondaryRaftRoot raft in MultiRaftRegistry.GetRoots())
-            {
-                if (raft != null && raft.HasPlacedBlocks)
-                    Debug.Log(raft.BuildPeriodicDiagnosticLine());
-            }
-        }
+        PlayerRaftPersistence.Update();
 
         if (!Raft_Network.IsHost)
         {
@@ -114,6 +101,7 @@ public class RebuildableRaft : Mod
         outgoingSequences.Clear();
         MultiRaftRegistry.RebuildFromScene();
         RaftNameRegistry.LoadCurrentWorld();
+        PlayerRaftPersistence.OnWorldLoaded();
 
         if (Raft_Network.IsHost)
         {
@@ -126,6 +114,7 @@ public class RebuildableRaft : Mod
     {
         RaftRenameWindow.Close(false);
         RaftReceiverRadar.Reset();
+        PlayerRaftPersistence.Reset();
         RaftNameRegistry.Reset();
         MultiRaftRegistry.Reset();
         incomingSequences.Clear();
@@ -136,6 +125,7 @@ public class RebuildableRaft : Mod
     {
         RaftRenameWindow.Close(false);
         RaftReceiverRadar.Reset();
+        PlayerRaftPersistence.Reset();
 
         if (harmony != null)
         {
@@ -148,7 +138,7 @@ public class RebuildableRaft : Mod
         outgoingSequences.Clear();
         incomingSequences.Clear();
 
-        Debug.Log("[RebuildableRaft] Unloaded");
+
     }
 
     private static void SendRaftStates()
@@ -165,9 +155,6 @@ public class RebuildableRaft : Mod
             outgoingSequences.TryGetValue(state.raftId, out previous);
             state.sequence = previous + 1;
             outgoingSequences[state.raftId] = state.sequence;
-
-            if (state.sequence % 40 == 0)
-                Debug.Log(raft.BuildPacketDiagnosticLine("SEND", state));
 
             SendNetworkPayload(state, EP2PSend.k_EP2PSendUnreliable);
             sentStates++;
@@ -208,13 +195,6 @@ public class RebuildableRaft : Mod
         {
             ReceiveRaftName(raftName);
             return true;
-        }
-
-        if (Time.realtimeSinceStartup >= nextWarningTime)
-        {
-            nextWarningTime = Time.realtimeSinceStartup + 10f;
-            Debug.LogWarning("[RebuildableRaft][NetChannel] Unsupported packet: " +
-                (message == null ? "null" : message.GetType().FullName));
         }
 
         return false;
@@ -301,13 +281,6 @@ public class RebuildableRaft : Mod
         receivedStates++;
         if (state.protocolVersion != NetworkProtocolVersion)
         {
-            if (Time.realtimeSinceStartup >= nextWarningTime)
-            {
-                nextWarningTime = Time.realtimeSinceStartup + 10f;
-                Debug.LogWarning("[RebuildableRaft][NetChannel] Protocol mismatch for raft=" +
-                    state.raftId + " got=" + state.protocolVersion +
-                    " expected=" + NetworkProtocolVersion);
-            }
             return;
         }
 
@@ -323,12 +296,6 @@ public class RebuildableRaft : Mod
         if (raft == null)
         {
             unknownRafts++;
-            if (Time.realtimeSinceStartup >= nextWarningTime)
-            {
-                nextWarningTime = Time.realtimeSinceStartup + 10f;
-                Debug.LogWarning("[RebuildableRaft][NetChannel] Missing raft root id=" +
-                    state.raftId + " seq=" + state.sequence);
-            }
             // Пакет не фиксируется как принятый, следующий сможет примениться после создания плота
             return;
         }
@@ -337,8 +304,7 @@ public class RebuildableRaft : Mod
         raft.ApplyNetworkState(state);
         appliedStates++;
 
-        if (state.sequence % 40 == 0)
-            Debug.Log(raft.BuildPacketDiagnosticLine("RECV", state));
+
     }
 
     private static void ReceiveRaftName(

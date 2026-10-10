@@ -282,6 +282,11 @@ public class SecondaryRaftRoot : MonoBehaviour
         private set;
     }
 
+    internal bool IsNetworkPoseReady
+    {
+        get { return Raft_Network.IsHost || hasNetworkState; }
+    }
+
     public Rigidbody Body
     {
         get;
@@ -2720,23 +2725,6 @@ public class SecondaryRaftRoot : MonoBehaviour
     private void OnWorldShift(
         Vector3 shift)
     {
-        Debug.Log(
-            "[RebuildableRaft][NetDiag] role=" +
-            (Raft_Network.IsHost ? "HOST" : "CLIENT") +
-            " event=WORLD_SHIFT raft=" +
-            RaftId +
-            " shift=" +
-            FormatVector3(shift) +
-            " raftBefore=" +
-            FormatVector3(transform.position) +
-            " mainBefore=" +
-            FormatVector3(
-                MultiRaftRegistry.MainPivot != null
-                    ? MultiRaftRegistry.MainPivot.position
-                    : Vector3.zero
-            )
-        );
-
         transform.position -=
             shift;
 
