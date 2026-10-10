@@ -247,7 +247,6 @@ public class SecondaryRaftRoot : MonoBehaviour
     private int debugMissingSinceLog;
     private int debugOutOfOrderSinceLog;
 
-    private bool waveReferenceInitialized;
     private float mainWaveReferenceY;
     private float raftWaveReferenceY;
 
@@ -2283,8 +2282,6 @@ public class SecondaryRaftRoot : MonoBehaviour
         raftWaveReferenceY =
             transform.position.y;
 
-        waveReferenceInitialized =
-            true;
     }
 
     public void RegisterDynamicBodyContact(
