@@ -454,42 +454,41 @@ public static class MultiRaftRegistry
     {
         pivot = MainPivot;
 
-        if (player == null ||
-            player.CameraTransform == null)
-        {
+        if (player == null || player.CameraTransform == null)
             return false;
+
+        RaycastHit[] hits = Physics.RaycastAll(
+            player.CameraTransform.position,
+            player.CameraTransform.forward,
+            Player.UseDistance * 2f,
+            LayerMasks.MASK_Block | LayerMasks.MASK_BuildQuad |
+                LayerMasks.MASK_GroundMask_Raft,
+            QueryTriggerInteraction.Ignore);
+
+        Block nearestBlock = null;
+        float nearestDistance = float.MaxValue;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            RaycastHit hit = hits[i];
+            if (hit.collider == null || hit.distance >= nearestDistance)
+                continue;
+
+            Block block = hit.collider.GetComponentInParent<Block>();
+            if (block == null || !block.hasBeenPlaced ||
+                !block.gameObject.activeInHierarchy)
+                continue;
+
+            nearestBlock = block;
+            nearestDistance = hit.distance;
         }
 
-        RaycastHit hit;
-
-        if (!Physics.Raycast(
-                player.CameraTransform.position,
-                player.CameraTransform.forward,
-                out hit,
-                Player.UseDistance * 2f,
-                LayerMasks.MASK_Block,
-                QueryTriggerInteraction.UseGlobal
-            ))
-        {
+        if (nearestBlock == null)
             return false;
-        }
 
-        Block block =
-            hit.transform.GetComponentInParent
-                <Block>();
-
-        SecondaryRaftRoot root =
-            GetRootFromBlock(block);
-
-        if (root == null)
-        {
-            return block != null;
-        }
-
-        pivot =
-            root.BuildPivot;
-
-        return true;
+        SecondaryRaftRoot root = GetRootFromBlock(nearestBlock);
+        pivot = root != null ? root.BuildPivot : MainPivot;
+        return pivot != null;
     }
 
     public static SecondaryRaftRoot FindRootAtGroundPoint(

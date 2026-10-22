@@ -6,10 +6,10 @@ using System.Linq;
 using HarmonyLib;
 using UnityEngine;
 
-public static class RebuildableRaftDevAutoLoad
+public static class SecondRaftDevAutoLoad
 {
-    private const string AutoLoadArgument = "-rebuildableraft-autoload";
-    private const string LegacyDevArgument = "-rebuildableraft-dev";
+    private const string AutoLoadArgument = "-SecondRaft-autoload";
+    private const string LegacyDevArgument = "-SecondRaft-dev";
     private const float ComponentsTimeout = 30f;
     private const float MainMenuDelay = 3f;
 
@@ -42,7 +42,7 @@ public static class RebuildableRaftDevAutoLoad
         runnerCreated = true;
 
         GameObject gameObject =
-            new GameObject("RebuildableRaft_AutoLoad");
+            new GameObject("SecondRaft_AutoLoad");
 
         gameObject.hideFlags = HideFlags.HideAndDontSave;
 
@@ -50,10 +50,10 @@ public static class RebuildableRaftDevAutoLoad
             gameObject
         );
 
-        gameObject.AddComponent<RebuildableRaftAutoLoadRunner>();
+        gameObject.AddComponent<SecondRaftAutoLoadRunner>();
 
         Debug.Log(
-            "[RebuildableRaft] Автозагрузка последнего мира включена"
+            "[SecondRaft] Автозагрузка последнего мира включена"
         );
     }
 
@@ -75,7 +75,7 @@ public static class RebuildableRaftDevAutoLoad
             if (Time.realtimeSinceStartup >= timeoutAt)
             {
                 Debug.LogError(
-                    "[RebuildableRaft] Компоненты загрузки мира не появились за 30 секунд"
+                    "[SecondRaft] Компоненты загрузки мира не появились за 30 секунд"
                 );
 
                 yield break;
@@ -108,14 +108,14 @@ public static class RebuildableRaftDevAutoLoad
             network == null)
         {
             Debug.LogError(
-                "[RebuildableRaft] Компоненты загрузки мира исчезли до запуска"
+                "[SecondRaft] Компоненты загрузки мира исчезли до запуска"
             );
 
             yield break;
         }
 
         Debug.Log(
-            "[RebuildableRaft] Компоненты загрузки мира найдены"
+            "[SecondRaft] Компоненты загрузки мира найдены"
         );
 
         saveAndLoad.CreateNecessaryLoadDirectories();
@@ -129,7 +129,7 @@ public static class RebuildableRaftDevAutoLoad
         if (!worldRoot.Exists)
         {
             Debug.LogError(
-                "[RebuildableRaft] Папка сохранений не найдена"
+                "[SecondRaft] Папка сохранений не найдена"
             );
 
             yield break;
@@ -182,7 +182,7 @@ public static class RebuildableRaftDevAutoLoad
             latest.rgdGame == null)
         {
             Debug.LogError(
-                "[RebuildableRaft] Не найдено сохранений для автозагрузки"
+                "[SecondRaft] Не найдено сохранений для автозагрузки"
             );
 
             yield break;
@@ -199,7 +199,7 @@ public static class RebuildableRaftDevAutoLoad
         GameManager.FriendlyFire = false;
 
         Debug.Log(
-            "[RebuildableRaft] Запускается последнее изменённое сохранение"
+            "[SecondRaft] Запускается последнее изменённое сохранение"
         );
 
         network.HostGame(
@@ -232,23 +232,23 @@ public static class RebuildableRaftDevAutoLoad
     }
 }
 
-internal sealed class RebuildableRaftAutoLoadRunner
+internal sealed class SecondRaftAutoLoadRunner
     : MonoBehaviour
 {
     private IEnumerator Start()
     {
         yield return
-            RebuildableRaftDevAutoLoad.LoadLatestWorld();
+            SecondRaftDevAutoLoad.LoadLatestWorld();
     }
 }
 
 [HarmonyPatch(typeof(BlockCreator), "Update")]
-internal static class RebuildableRaftAutoLoadBootstrap
+internal static class SecondRaftAutoLoadBootstrap
 {
     [HarmonyPrepare]
     private static bool Prepare()
     {
-        RebuildableRaftDevAutoLoad.CreateRunner();
+        SecondRaftDevAutoLoad.CreateRunner();
 
         return false;
     }

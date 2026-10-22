@@ -84,8 +84,7 @@ public static class BlockCreator_Update_RebuildableRaft
                     out targetPivot
                 );
 
-        if (!hasBuildQuad &&
-            __instance.selectedBlock == null)
+        if (!hasBuildQuad)
         {
             MultiRaftRegistry
                 .TryGetBlockPivotAtCursor(
@@ -1331,7 +1330,7 @@ public static class Message_BlockCreator_UpgradeBlock_Constructor_RebuildableRaf
         __instance.hotSlotIndex =
             MultiRaftRegistry.EncodeHotSlot(
                 root.RaftId,
-                -1,
+                __instance.hotSlotIndex,
                 false
             );
     }
@@ -1806,7 +1805,7 @@ public static class BlockCreator_Deserialize_RebuildableRaft
                     MultiRaftRegistry
                         .EncodeHotSlot(
                             __state.raftId,
-                            -1,
+                            __state.originalHotSlot,
                             false
                         );
             }

@@ -53,6 +53,7 @@ public class RebuildableRaft : Mod
         MultiRaftRegistry.Reset();
         RaftNameRegistry.Reset();
         PlayerRaftPersistence.Reset();
+        PlayerRaftRespawn.Reset();
 
         harmony = new Harmony("el.rebuildableraft.multiraft");
         harmony.PatchAll();
@@ -69,6 +70,7 @@ public class RebuildableRaft : Mod
 
         RaftRenameWindow.Update();
         PlayerRaftPersistence.Update();
+        PlayerRaftRespawn.Update();
 
         if (!Raft_Network.IsHost)
         {
@@ -115,6 +117,7 @@ public class RebuildableRaft : Mod
         RaftRenameWindow.Close(false);
         RaftReceiverRadar.Reset();
         PlayerRaftPersistence.Reset();
+        PlayerRaftRespawn.Reset();
         RaftNameRegistry.Reset();
         MultiRaftRegistry.Reset();
         incomingSequences.Clear();
@@ -126,6 +129,7 @@ public class RebuildableRaft : Mod
         RaftRenameWindow.Close(false);
         RaftReceiverRadar.Reset();
         PlayerRaftPersistence.Reset();
+        PlayerRaftRespawn.Reset();
 
         if (harmony != null)
         {

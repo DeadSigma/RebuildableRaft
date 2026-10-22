@@ -5,8 +5,8 @@
 		<LangVersion>7.3</LangVersion>
 		<PlatformTarget>x64</PlatformTarget>
 
-		<AssemblyName>RebuildableRaft</AssemblyName>
-		<RootNamespace>RebuildableRaft</RootNamespace>
+		<AssemblyName>SecondRaft</AssemblyName>
+		<RootNamespace>SecondRaft</RootNamespace>
 
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 		<OutputPath>bin\$(Configuration)\</OutputPath>
@@ -219,7 +219,7 @@
 	</Target>
 
 	<Target Name="LaunchRaftDev" AfterTargets="Rebuild">
-		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = Get-Process -Name Raft -ErrorAction SilentlyContinue; if ($null -ne $p) { Write-Warning 'Raft уже запущен - закрой игру и запусти сборку ещё раз'; exit 0 }; $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamExe; if ([string]::IsNullOrWhiteSpace($steam)) { $steam = Join-Path ${env:ProgramFiles(x86)} 'Steam\steam.exe' }; if (!(Test-Path $steam)) { throw 'Steam.exe не найден' }; Start-Process -FilePath $steam -ArgumentList '-applaunch 648800 -rml -RebuildableRaft-dev'; Write-Host 'Raft запущен через Steam с RML'&quot;" />
+		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$p = Get-Process -Name Raft -ErrorAction SilentlyContinue; if ($null -ne $p) { Write-Warning 'Raft уже запущен - закрой игру и запусти сборку ещё раз'; exit 0 }; $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamExe; if ([string]::IsNullOrWhiteSpace($steam)) { $steam = Join-Path ${env:ProgramFiles(x86)} 'Steam\steam.exe' }; if (!(Test-Path $steam)) { throw 'Steam.exe не найден' }; Start-Process -FilePath $steam -ArgumentList '-applaunch 648800 -rml -SecondRaft-dev'; Write-Host 'Raft запущен через Steam с RML'&quot;" />
 	</Target>
 
 </Project>

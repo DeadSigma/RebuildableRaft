@@ -1,9 +1,9 @@
 {
-  "name": "More Rafts",
+  "name": "Second Raft",
   "author": "El_Neuman",
-  "description": "Allows to create more rafts",
-  "version": "0.1.0-rc.6",
-    "icon": "icon.png",
+  "description": "Allows to create more rafts in the world.",
+  "version": "0.1.1",
+  "icon": "icon.png",
   "banner": "banner.png",
   "gameVersion": "1.0",
   "requiredByAllPlayers": true,

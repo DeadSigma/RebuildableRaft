@@ -688,6 +688,68 @@ internal static class PlayerRaftPersistence
         return "Teleported to raft " + raftNumber + " (ID " + root.RaftId + ")";
     }
 
+    internal static bool TryRespawnOnRaft(int raftId, bool allowFallback,
+        bool completingRespawn = false)
+    {
+        Network_Player player = RAPI.GetLocalPlayer();
+        if (player == null || !player.IsLocalPlayer || player.PersonController == null ||
+            player.PlayerScript == null ||
+            (!completingRespawn && (player.IsKilled || player.PlayerScript.IsDead)))
+            return false;
+
+        Vector3 destination;
+        if (raftId == 0 && MultiRaftRegistry.HasPrimaryBlocks() &&
+            TryFindPrimaryLandingPosition(out destination))
+        {
+            TeleportPlayer(player, destination, player.transform.eulerAngles.y, null);
+            return true;
+        }
+
+        if (raftId > 0)
+        {
+            SecondaryRaftRoot wanted = MultiRaftRegistry.GetRoot(raftId);
+            if (wanted != null && wanted.HasPlacedBlocks && wanted.IsNetworkPoseReady &&
+                TryFindLandingPosition(wanted, out destination))
+            {
+                TeleportPlayer(player, destination, player.transform.eulerAngles.y, wanted);
+                return true;
+            }
+        }
+
+        if (!allowFallback)
+            return false;
+
+        if (MultiRaftRegistry.HasPrimaryBlocks() &&
+            TryFindPrimaryLandingPosition(out destination))
+        {
+            TeleportPlayer(player, destination, player.transform.eulerAngles.y, null);
+            return true;
+        }
+
+        List<SecondaryRaftRoot> alternatives = new List<SecondaryRaftRoot>();
+        foreach (SecondaryRaftRoot root in MultiRaftRegistry.GetRoots())
+        {
+            if (root != null && root.HasPlacedBlocks && root.IsNetworkPoseReady)
+                alternatives.Add(root);
+        }
+
+        alternatives.Sort(delegate(SecondaryRaftRoot a, SecondaryRaftRoot b)
+        {
+            return a.RaftId.CompareTo(b.RaftId);
+        });
+
+        foreach (SecondaryRaftRoot root in alternatives)
+        {
+            if (!TryFindLandingPosition(root, out destination))
+                continue;
+
+            TeleportPlayer(player, destination, player.transform.eulerAngles.y, root);
+            return true;
+        }
+
+        return false;
+    }
+
     private static bool TryFindPrimaryLandingPosition(out Vector3 position)
     {
         position = Vector3.zero;
@@ -792,6 +854,8 @@ internal static class PlayerRaftPersistence
         Physics.SyncTransforms();
         if (controllerEnabled)
             controller.enabled = true;
+
+        PlayerRaftRespawn.NotifyTeleport(targetRoot != null ? targetRoot.RaftId : 0);
     }
 }
 
