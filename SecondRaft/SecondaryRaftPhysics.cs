@@ -249,6 +249,9 @@ public class SecondaryRaftRoot : MonoBehaviour
 
     private float mainWaveReferenceY;
     private float raftWaveReferenceY;
+    private float filteredWaterY;
+    private bool waterYInitialized;
+    private const float MaxVerticalWaterSpeed = 3f;
 
     private bool carryPoseInitialized;
     private bool carryingLocalPlayer;
@@ -470,6 +473,7 @@ public class SecondaryRaftRoot : MonoBehaviour
                     driftChangeSpeed
                 );
 
+            // Волновой наклон обновляется отдельно от физической высоты
             PrepareWavePoseForFrame();
         }
 
@@ -896,46 +900,47 @@ public class SecondaryRaftRoot : MonoBehaviour
         bool snap)
     {
         float targetY;
+        if (!TryGetVanillaWaterHeight(worldPosition, out targetY))
+            return currentY;
 
-        if (!SecondaryRaftWaterSampler
-                .TryGetSurfaceY(
-                    worldPosition,
-                    WaterSurfaceOffset,
-                    out targetY
-                ))
-        {
-            GameManager gameManager =
-                SingletonGeneric<GameManager>.Singleton;
-
-            if (gameManager != null &&
-                gameManager.buoyancy != null)
-            {
-                targetY =
-                    gameManager.buoyancy.CenterPointY;
-            }
-            else
-            {
-                targetY =
-                    networkPosition.y;
-            }
-        }
-
-        if (snap)
-        {
+        if (snap || Mathf.Abs(targetY - currentY) > 2.5f)
             return targetY;
+
+        float follow = 1f - Mathf.Exp(
+            -WaveHeightFollowSpeed * Time.deltaTime);
+        return Mathf.Lerp(currentY, targetY, follow);
+    }
+
+    // Высота второго плота согласуется с ванильной плавучестью основного
+    private static bool TryGetVanillaWaterHeight(
+        Vector3 worldPosition,
+        out float targetY)
+    {
+        targetY = 0f;
+        GameManager gameManager = SingletonGeneric<GameManager>.Singleton;
+        if (gameManager == null || gameManager.buoyancy == null)
+            return false;
+
+        targetY = gameManager.buoyancy.CenterPointY;
+
+        // Изменение высоты волн между двумя плотами добавляется к ванильной высоте
+        RaftBounds mainBounds = ComponentManager<RaftBounds>.Value;
+        if (mainBounds == null)
+            return true;
+
+        float localWater;
+        float mainWater;
+        if (SecondaryRaftWaterSampler.TryGetSurfaceY(
+                worldPosition, 0f, out localWater) &&
+            SecondaryRaftWaterSampler.TryGetSurfaceY(
+                mainBounds.Center, 0f, out mainWater))
+        {
+            float difference = localWater - mainWater;
+            if (!float.IsNaN(difference) && !float.IsInfinity(difference))
+                targetY += Mathf.Clamp(difference, -1.5f, 1.5f);
         }
 
-        float follow =
-            1f - Mathf.Exp(
-                -WaveHeightFollowSpeed *
-                Time.deltaTime
-            );
-
-        return Mathf.Lerp(
-            currentY,
-            targetY,
-            follow
-        );
+        return true;
     }
 
 
@@ -1747,6 +1752,9 @@ public class SecondaryRaftRoot : MonoBehaviour
             DeviceRefreshInterval;
 
         RefreshDevices();
+        SecondaryRaftPhysicalHull hull = GetComponent<SecondaryRaftPhysicalHull>();
+        if (hull != null)
+            hull.Refresh();
         emptyTimer = 0f;
     }
 
@@ -2505,50 +2513,43 @@ public class SecondaryRaftRoot : MonoBehaviour
 
     private void ApplyWaterHeightFixed()
     {
-        if (Body == null)
-        {
+        if (Body == null || Body.isKinematic || !HasPlacedBlocks)
             return;
-        }
 
-        Vector3 position =
-            Body.position;
+        Vector3 position = Body.position;
+        float surfaceY;
+        if (!TryGetVanillaWaterHeight(position, out surfaceY) ||
+            float.IsNaN(surfaceY) || float.IsInfinity(surfaceY))
+            return;
 
-        float targetY;
-
-        if (!SecondaryRaftWaterSampler
-                .TryGetSurfaceY(
-                    position,
-                    WaterSurfaceOffset,
-                    out targetY
-                ))
+        if (!waterYInitialized)
         {
-            GameManager gameManager =
-                SingletonGeneric<GameManager>.Singleton;
-
-            if (gameManager == null ||
-                gameManager.buoyancy == null)
-            {
-                return;
-            }
-
-            targetY =
-                gameManager.buoyancy.CenterPointY;
+            filteredWaterY = position.y;
+            waterYInitialized = true;
         }
 
-        float follow =
-            1f - Mathf.Exp(
-                -WaveHeightFollowSpeed *
-                Time.fixedDeltaTime
-            );
+        float dt = Mathf.Max(Time.fixedDeltaTime, 0.0001f);
+        float follow = 1f - Mathf.Exp(-WaveHeightFollowSpeed * dt);
 
-        position.y =
-            Mathf.Lerp(
-                position.y,
-                targetY,
-                follow
-            );
+        // Высота сглаживается один раз за физический тик
+        // Резкие скачки измерения воды ограничиваются по скорости
+        filteredWaterY = Mathf.Lerp(
+            filteredWaterY,
+            surfaceY,
+            follow);
 
-        Body.MovePosition(position);
+        float desiredY = Mathf.MoveTowards(
+            position.y,
+            filteredWaterY,
+            MaxVerticalWaterSpeed * dt);
+
+        if (Mathf.Abs(desiredY - position.y) > 0.0001f)
+        {
+            position.y = desiredY;
+            Body.MovePosition(position);
+        }
+
+        // Вертикальная скорость обнуляется в ClampBodyMotion
     }
 
     public void CarryLocalPlayerBeforeUpdate(
@@ -2722,6 +2723,8 @@ public class SecondaryRaftRoot : MonoBehaviour
     private void OnWorldShift(
         Vector3 shift)
     {
+        // Опорная высота обновится на следующем физическом тике
+        waterYInitialized = false;
         transform.position -=
             shift;
 

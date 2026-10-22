@@ -1,9 +1,41 @@
 using HarmonyLib;
+using HMLLibrary;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
 using UnityEngine;
+
+// Атаки останавливаются до уничтожения сетевых компонентов при выходе из мира
+internal static class SecondaryRaftSharkSession
+{
+    internal static bool IsLeavingWorld { get; private set; }
+
+    internal static void BeginWorld()
+    {
+        IsLeavingWorld = false;
+    }
+
+    internal static void BeginShutdown()
+    {
+        IsLeavingWorld = true;
+    }
+
+    internal static bool CanProcessSharkDamage
+    {
+        get
+        {
+            if (IsLeavingWorld || SaveAndLoad.IsGameLoading ||
+                !RAPI.IsCurrentSceneGame())
+                return false;
+
+            Raft_Network network = ComponentManager<Raft_Network>.Value;
+            Network_Host_Entities entities = ComponentManager<Network_Host_Entities>.Value;
+            return network != null && entities != null &&
+                entities.gameObject.activeInHierarchy;
+        }
+    }
+}
 
 // За каждой дополнительной акулой закрепляется отдельный плот
 public sealed class SecondaryRaftSharkBinding : MonoBehaviour
@@ -14,6 +46,10 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
     private AI_StateMachine_Shark shark;
     private float nextResolveTime;
     private float initializedAt;
+    private float ownerAssignedAt;
+    private float ownerMissingSince = -1f;
+    private bool hadValidOwner;
+    private bool removalRequested;
 
     private void Awake()
     {
@@ -33,6 +69,13 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
     public void Assign(int raftId)
     {
         RaftId = raftId;
+        ownerAssignedAt = Time.realtimeSinceStartup;
+        ownerMissingSince = -1f;
+        if (raftId > 0)
+        {
+            SecondaryRaftRoot root = GetRoot();
+            hadValidOwner = root != null && root.HasPlacedBlocks;
+        }
         ApplyPivot();
     }
 
@@ -61,26 +104,117 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
         return root != null ? root.BuildPivot : null;
     }
 
+    // При исчезновении собственного плота ИИ останавливается до удаления объекта
+    public bool OwnerUnavailable()
+    {
+        if (RaftId <= 0 || SaveAndLoad.IsGameLoading)
+            return false;
+
+        SecondaryRaftRoot root = GetRoot();
+        if (root != null && root.HasPlacedBlocks && root.BuildPivot != null)
+        {
+            hadValidOwner = true;
+            ownerMissingSince = -1f;
+            return false;
+        }
+
+        if (ownerMissingSince < 0f)
+            ownerMissingSince = Time.realtimeSinceStartup;
+        return true;
+    }
+
+    public bool ShouldDespawn()
+    {
+        if (!OwnerUnavailable())
+            return false;
+
+        // Хост удаляет акулу сразу после потери подтверждённого плота
+        if (hadValidOwner && Raft_Network.IsHost)
+            return true;
+
+        float missingFor = Time.realtimeSinceStartup - ownerMissingSince;
+        if (hadValidOwner)
+            return missingFor >= 0.5f;
+
+        // После загрузки даётся время на регистрацию сохранённого плота
+        float assignedFor = Time.realtimeSinceStartup - ownerAssignedAt;
+        return assignedFor >= 12f && missingFor >= 5f;
+    }
+
+    public void Despawn()
+    {
+        if (removalRequested || SaveAndLoad.IsGameLoading ||
+            SecondaryRaftSharkSession.IsLeavingWorld)
+            return;
+
+        removalRequested = true;
+        AI_StateMachine_Shark machine = Shark;
+        if (machine == null)
+        {
+            if (gameObject.activeSelf)
+                gameObject.SetActive(false);
+            Destroy(gameObject);
+            return;
+        }
+
+        // Сетевая сущность удаляется целиком, а не только компонент ИИ
+        GameObject owner = machine.networkBehaviour != null
+            ? machine.networkBehaviour.gameObject : machine.gameObject;
+        if (owner == null)
+            owner = machine.gameObject;
+        owner.SetActive(false);
+        Destroy(owner);
+    }
+
     private void Update()
     {
+        if (removalRequested || SaveAndLoad.IsGameLoading ||
+            SecondaryRaftSharkSession.IsLeavingWorld)
+            return;
+
+        // Проверка выполняется каждый кадр, а не раз в несколько секунд
+        if (RaftId > 0 && OwnerUnavailable())
+        {
+            if (ShouldDespawn())
+                Despawn();
+            return;
+        }
+
         if (Time.realtimeSinceStartup < nextResolveTime)
             return;
 
         nextResolveTime = Time.realtimeSinceStartup + 1.5f;
-
         if (RaftId < 0)
         {
             SecondaryRaftRoot root = SecondaryRaftSharkLogic.FindRootAtSpawn(
                 InitialSpawnPosition, 14f);
             if (root != null)
-                RaftId = root.RaftId;
+                Assign(root.RaftId);
             else if (Time.realtimeSinceStartup - initializedAt > 20f)
-                RaftId = SecondaryRaftSharkLogic.ClassifyRestoredShark(
-                    InitialSpawnPosition);
+                Assign(SecondaryRaftSharkLogic.ClassifyRestoredShark(
+                    InitialSpawnPosition));
         }
 
-        // При удалении плота акула не передаётся другому плоту
+        // При исчезновении плота акула не назначается главному плоту
         ApplyPivot();
+    }
+}
+
+// Удаление корневого объекта также удаляет закреплённую акулу
+public sealed class SecondaryRaftSharkRaftLifetime : MonoBehaviour
+{
+    private int raftId;
+
+    public void Initialize(int id)
+    {
+        raftId = id;
+    }
+
+    private void OnDestroy()
+    {
+        if (raftId > 0 && !SaveAndLoad.IsGameLoading &&
+            !SecondaryRaftSharkSession.IsLeavingWorld)
+            SecondaryRaftSharkLogic.DespawnForRaft(raftId);
     }
 }
 
@@ -97,6 +231,22 @@ internal static class SecondaryRaftSharkLogic
 
     internal static int PendingRaftId = -1;
     internal static bool InHostFactoryCall;
+
+    internal static void DespawnForRaft(int raftId)
+    {
+        if (raftId <= 0 || SaveAndLoad.IsGameLoading ||
+            SecondaryRaftSharkSession.IsLeavingWorld)
+            return;
+
+        SecondaryRaftSharkBinding[] bindings =
+            UnityEngine.Object.FindObjectsOfType<SecondaryRaftSharkBinding>();
+        for (int i = 0; i < bindings.Length; i++)
+        {
+            SecondaryRaftSharkBinding binding = bindings[i];
+            if (binding != null && binding.RaftId == raftId)
+                binding.Despawn();
+        }
+    }
 
     internal static bool SharksEnabled(Network_Host_Entities entities)
     {
@@ -399,6 +549,8 @@ internal static class SecondaryRaftSharkHostStart
     [HarmonyPostfix]
     private static void Postfix(Network_Host_Entities __instance)
     {
+        SecondaryRaftSharkSession.BeginWorld();
+
         if (Raft_Network.IsHost &&
             __instance.GetComponent<SecondaryRaftSharkManager>() == null)
             __instance.gameObject.AddComponent<SecondaryRaftSharkManager>();
@@ -452,6 +604,30 @@ internal static class SecondaryRaftSharkStarted
 [HarmonyPatch(typeof(AI_StateMachine_Shark), "UpdateStateMachine")]
 internal static class SecondaryRaftSharkPlayerOnRaft
 {
+    [HarmonyPrefix]
+    private static bool Prefix(AI_StateMachine_Shark __instance)
+    {
+        if (!SecondaryRaftSharkSession.CanProcessSharkDamage)
+            return false;
+
+        SecondaryRaftSharkBinding binding =
+            SecondaryRaftSharkLogic.GetBinding(__instance);
+        if (binding == null || binding.RaftId <= 0)
+            return true;
+
+        // ИИ дополнительной акулы не обновляется во время загрузки мира
+        if (SaveAndLoad.IsGameLoading)
+            return false;
+
+        // Состояние ИИ не обновляется при удалённом опорном Transform
+        if (!binding.OwnerUnavailable())
+            return true;
+
+        if (binding.ShouldDespawn())
+            binding.Despawn();
+        return false;
+    }
+
     private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
     {
         MethodInfo original = AccessTools.Method(typeof(Helper), "IsAPlayerOnTheRaft", Type.EmptyTypes);
@@ -473,6 +649,28 @@ internal static class SecondaryRaftSharkPlayerOnRaft
                 yield return instruction;
             }
         }
+    }
+}
+
+// Защита для акул из старых сохранений с уже уничтоженным опорным Transform
+[HarmonyPatch(typeof(AI_StateMachine_Shark), "GetRandomWaterPointInVision")]
+internal static class SecondaryRaftSharkInvalidCirculationTarget
+{
+    [HarmonyPrefix]
+    private static bool Prefix(AI_StateMachine_Shark __instance,
+        Transform originTarget, ref Vector3 __result)
+    {
+        if (originTarget != null)
+            return true;
+
+        SecondaryRaftSharkBinding binding =
+            SecondaryRaftSharkLogic.GetBinding(__instance);
+        if (binding != null && binding.RaftId > 0 && binding.ShouldDespawn())
+            binding.Despawn();
+
+        // Обращение к originTarget.position при null блокируется
+        __result = __instance != null ? __instance.transform.position : Vector3.zero;
+        return false;
     }
 }
 
@@ -535,6 +733,9 @@ internal static class SecondaryRaftSharkValidateCurrentTarget
     [HarmonyPrefix]
     private static bool Prefix(AI_State_Attack_Block_Shark __instance)
     {
+        if (!SecondaryRaftSharkSession.CanProcessSharkDamage)
+            return false;
+
         if (!Raft_Network.IsHost)
             return true;
 
@@ -559,14 +760,35 @@ internal static class SecondaryRaftSharkBeforeBite
     private static bool Prefix(AI_State_Attack_Block_Shark __instance,
         Block p_targetBlock)
     {
+        if (!SecondaryRaftSharkSession.CanProcessSharkDamage ||
+            p_targetBlock == null || p_targetBlock.Health <= 0 ||
+            !p_targetBlock.hasBeenPlaced || !p_targetBlock.gameObject.activeInHierarchy)
+            return false;
+
         AI_StateMachine_Shark shark = SecondaryRaftSharkLogic.GetMachine(__instance);
-        if (shark == null || __instance != shark.biteRaftState ||
+        if (shark == null)
+            return false;
+
+        if (__instance != shark.biteRaftState ||
             SecondaryRaftSharkLogic.OwnsBlock(shark, p_targetBlock))
             return true;
 
         if (Raft_Network.IsHost)
             shark.ChangeState(shark.diveState);
         return false;
+    }
+}
+
+// Атака не продолжается, если началась выгрузка сцены или цель уже исчезла
+[HarmonyPatch(typeof(AI_State_Attack_Block_Shark), "AttackBlock")]
+internal static class SecondaryRaftSharkAttackOnExit
+{
+    [HarmonyPrefix]
+    private static bool Prefix(Block p_targetBlock)
+    {
+        return SecondaryRaftSharkSession.CanProcessSharkDamage &&
+            p_targetBlock != null && p_targetBlock.Health > 0 &&
+            p_targetBlock.gameObject.activeInHierarchy;
     }
 }
 
@@ -578,8 +800,16 @@ internal static class SecondaryRaftSharkDamageGuard
     private static bool Prefix(AI_State_Attack_Block_Shark __instance,
         Block p_targetBlock)
     {
+        if (!SecondaryRaftSharkSession.CanProcessSharkDamage ||
+            p_targetBlock == null || p_targetBlock.Health <= 0 ||
+            !p_targetBlock.hasBeenPlaced || !p_targetBlock.gameObject.activeInHierarchy)
+            return false;
+
         AI_StateMachine_Shark shark = SecondaryRaftSharkLogic.GetMachine(__instance);
-        if (shark == null || __instance != shark.biteRaftState ||
+        if (shark == null)
+            return false;
+
+        if (__instance != shark.biteRaftState ||
             SecondaryRaftSharkLogic.OwnsBlock(shark, p_targetBlock))
             return true;
 
@@ -672,6 +902,21 @@ internal static class SecondaryRaftSharkDisableVanillaRespawn
 // Только хост проверяет наличие акул и создаёт недостающих
 public sealed class SecondaryRaftSharkManager : MonoBehaviour
 {
+    private void OnApplicationQuit()
+    {
+        SecondaryRaftSharkSession.BeginShutdown();
+    }
+
+    private void OnDisable()
+    {
+        SecondaryRaftSharkSession.BeginShutdown();
+    }
+
+    private void OnDestroy()
+    {
+        SecondaryRaftSharkSession.BeginShutdown();
+    }
+
     private Network_Host_Entities entities;
     private readonly Dictionary<int, float> missingUntil = new Dictionary<int, float>();
     private readonly HashSet<int> previouslyCovered = new HashSet<int>();
@@ -686,7 +931,8 @@ public sealed class SecondaryRaftSharkManager : MonoBehaviour
 
     private void Update()
     {
-        if (!Raft_Network.IsHost || SaveAndLoad.IsGameLoading ||
+        if (!Raft_Network.IsHost ||
+            !SecondaryRaftSharkSession.CanProcessSharkDamage ||
             !SecondaryRaftSharkLogic.SharksEnabled(entities) ||
             Time.realtimeSinceStartup < firstCheck ||
             Time.realtimeSinceStartup < nextCheck)
@@ -722,6 +968,13 @@ public sealed class SecondaryRaftSharkManager : MonoBehaviour
             {
                 binding.Assign(SecondaryRaftSharkLogic.ClassifyRestoredShark(
                     binding.InitialSpawnPosition));
+            }
+
+            if (binding.RaftId > 0 && binding.OwnerUnavailable())
+            {
+                if (binding.ShouldDespawn())
+                    binding.Despawn();
+                continue;
             }
 
             if (IsDeadOrDecaying(shark))
@@ -802,5 +1055,17 @@ public sealed class SecondaryRaftSharkManager : MonoBehaviour
         {
             missingUntil[raftId] = time + 10f;
         }
+    }
+}
+
+// При выгрузке мира блок не отправляет сетевое удаление через уже отключённые компоненты
+[HarmonyPatch(typeof(BlockCreator), "RemoveBlockNetwork")]
+internal static class SecondaryRaftSharkBlockRemovalOnExit
+{
+    [HarmonyPrefix]
+    [HarmonyPriority(Priority.First)]
+    private static bool Prefix()
+    {
+        return !SecondaryRaftSharkSession.IsLeavingWorld;
     }
 }

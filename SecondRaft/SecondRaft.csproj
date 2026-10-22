@@ -88,6 +88,11 @@
 			<Private>false</Private>
 		</Reference>
 
+		<Reference Include="UnityEngine.IMGUIModule">
+			<HintPath>$(RaftDir)\Raft_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
+
 		<Reference Include="UnityEngine.UI">
 			<HintPath>$(RaftDir)\Raft_Data\Managed\UnityEngine.UI.dll</HintPath>
 			<Private>false</Private>

@@ -181,6 +181,7 @@ public static class MultiRaftRegistry
                 <SecondaryRaftRoot>();
 
         root.Initialize(raftId);
+        EnsureIslandCollision(root);
 
         return root;
     }
@@ -197,11 +198,38 @@ public static class MultiRaftRegistry
         Roots[root.RaftId] =
             root;
 
+        EnsureIslandCollision(root);
+
         if (root.RaftId >= nextRaftId)
         {
             nextRaftId =
                 root.RaftId + 1;
         }
+    }
+
+    private static void EnsureIslandCollision(SecondaryRaftRoot root)
+    {
+        if (root == null)
+            return;
+
+        // Устаревшая обработка берега отключается - её откаты мешают физике
+        Behaviour legacy = root.GetComponent("SecondaryRaftIslandCollision") as Behaviour;
+        if (legacy != null)
+        {
+            legacy.enabled = false;
+            UnityEngine.Object.Destroy(legacy);
+        }
+
+        // Корпус размещается на динамическом Rigidbody, как у основного плота
+        if (root.GetComponent<SecondaryRaftPhysicalHull>() == null)
+            root.gameObject.AddComponent<SecondaryRaftPhysicalHull>();
+
+        // При уничтожении плота его акула также уничтожается
+        SecondaryRaftSharkRaftLifetime lifetime =
+            root.GetComponent<SecondaryRaftSharkRaftLifetime>();
+        if (lifetime == null)
+            lifetime = root.gameObject.AddComponent<SecondaryRaftSharkRaftLifetime>();
+        lifetime.Initialize(root.RaftId);
     }
 
     public static void Unregister(
@@ -219,6 +247,8 @@ public static class MultiRaftRegistry
             current == root)
         {
             Roots.Remove(root.RaftId);
+            // Акула уничтожается вместе с закреплённым за ней плотом
+            SecondaryRaftSharkLogic.DespawnForRaft(root.RaftId);
         }
     }
 
