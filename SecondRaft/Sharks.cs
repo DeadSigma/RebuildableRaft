@@ -1,5 +1,6 @@
 using HarmonyLib;
 using HMLLibrary;
+using Steamworks;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -14,6 +15,7 @@ internal static class SecondaryRaftSharkSession
     internal static void BeginWorld()
     {
         IsLeavingWorld = false;
+        SecondaryRaftSharkWire.Reset();
     }
 
     internal static void BeginShutdown()
@@ -25,7 +27,7 @@ internal static class SecondaryRaftSharkSession
     {
         get
         {
-            if (IsLeavingWorld || SaveAndLoad.IsGameLoading ||
+            if (IsLeavingWorld || GameManager.IsLeavingGame || SaveAndLoad.IsGameLoading ||
                 !RAPI.IsCurrentSceneGame())
                 return false;
 
@@ -45,15 +47,20 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
 
     private AI_StateMachine_Shark shark;
     private float nextResolveTime;
-    private float initializedAt;
     private float ownerAssignedAt;
     private float ownerMissingSince = -1f;
     private bool hadValidOwner;
     private bool removalRequested;
 
-    private void Awake()
+    internal bool RemovalRequested { get { return removalRequested; } }
+
+    internal AI_NetworkBehaviour NetworkBehaviour
     {
-        initializedAt = Time.realtimeSinceStartup;
+        get
+        {
+            AI_StateMachine_Shark machine = Shark;
+            return machine != null ? machine.networkBehaviour : null;
+        }
     }
 
     public AI_StateMachine_Shark Shark
@@ -68,6 +75,11 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
 
     public void Assign(int raftId)
     {
+        if (RaftId == raftId)
+        {
+            ApplyPivot();
+            return;
+        }
         RaftId = raftId;
         ownerAssignedAt = Time.realtimeSinceStartup;
         ownerMissingSince = -1f;
@@ -125,43 +137,41 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
 
     public bool ShouldDespawn()
     {
-        if (!OwnerUnavailable())
+        if (!Raft_Network.IsHost || !Raft_Network.WorldHasBeenRecieved ||
+            !OwnerUnavailable())
             return false;
-
-        // Хост удаляет акулу сразу после потери подтверждённого плота
-        if (hadValidOwner && Raft_Network.IsHost)
-            return true;
 
         float missingFor = Time.realtimeSinceStartup - ownerMissingSince;
         if (hadValidOwner)
             return missingFor >= 0.5f;
 
-        // После загрузки даётся время на регистрацию сохранённого плота
-        float assignedFor = Time.realtimeSinceStartup - ownerAssignedAt;
-        return assignedFor >= 12f && missingFor >= 5f;
+        return Time.realtimeSinceStartup - ownerAssignedAt >= 12f && missingFor >= 5f;
     }
 
+    // Удаление инициируется только хостом
     public void Despawn()
     {
-        if (removalRequested || SaveAndLoad.IsGameLoading ||
-            SecondaryRaftSharkSession.IsLeavingWorld)
+        if (removalRequested || !Raft_Network.IsHost ||
+            !Raft_Network.WorldHasBeenRecieved ||
+            !SecondaryRaftSharkSession.CanProcessSharkDamage)
+            return;
+
+        AI_NetworkBehaviour behaviour = NetworkBehaviour;
+        if (behaviour != null && !SecondaryRaftSharkWire.Send(behaviour.ObjectIndex, RaftId, true))
+            return;
+
+        DespawnLocal();
+    }
+
+    internal void DespawnLocal()
+    {
+        if (removalRequested)
             return;
 
         removalRequested = true;
-        AI_StateMachine_Shark machine = Shark;
-        if (machine == null)
-        {
-            if (gameObject.activeSelf)
-                gameObject.SetActive(false);
-            Destroy(gameObject);
-            return;
-        }
-
-        // Сетевая сущность удаляется целиком, а не только компонент ИИ
-        GameObject owner = machine.networkBehaviour != null
-            ? machine.networkBehaviour.gameObject : machine.gameObject;
-        if (owner == null)
-            owner = machine.gameObject;
+        AI_NetworkBehaviour behaviour = NetworkBehaviour;
+        GameObject owner = behaviour != null ? behaviour.gameObject : gameObject;
+        // При уничтожении AI_NetworkBehaviour снимается регистрация сетевых ID
         owner.SetActive(false);
         Destroy(owner);
     }
@@ -169,11 +179,10 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
     private void Update()
     {
         if (removalRequested || SaveAndLoad.IsGameLoading ||
-            SecondaryRaftSharkSession.IsLeavingWorld)
+            SecondaryRaftSharkSession.IsLeavingWorld || GameManager.IsLeavingGame)
             return;
 
-        // Проверка выполняется каждый кадр, а не раз в несколько секунд
-        if (RaftId > 0 && OwnerUnavailable())
+        if (Raft_Network.IsHost && RaftId > 0 && OwnerUnavailable())
         {
             if (ShouldDespawn())
                 Despawn();
@@ -184,19 +193,133 @@ public sealed class SecondaryRaftSharkBinding : MonoBehaviour
             return;
 
         nextResolveTime = Time.realtimeSinceStartup + 1.5f;
-        if (RaftId < 0)
-        {
-            SecondaryRaftRoot root = SecondaryRaftSharkLogic.FindRootAtSpawn(
-                InitialSpawnPosition, 14f);
-            if (root != null)
-                Assign(root.RaftId);
-            else if (Time.realtimeSinceStartup - initializedAt > 20f)
-                Assign(SecondaryRaftSharkLogic.ClassifyRestoredShark(
-                    InitialSpawnPosition));
-        }
-
-        // При исчезновении плота акула не назначается главному плоту
         ApplyPivot();
+    }
+
+}
+
+// Принадлежность и удаление передаются по сетевому ID акулы
+[Serializable]
+public sealed class Message_SecondaryRaftSharkOwner
+{
+    public uint objectIndex;
+    public int raftId;
+    public bool remove;
+}
+
+internal static class SecondaryRaftSharkWire
+{
+    private static readonly MethodInfo SendPayload = AccessTools.Method(
+        typeof(RebuildableRaft), "SendNetworkPayload", new Type[] { typeof(object), typeof(EP2PSend) });
+
+    private static readonly Dictionary<uint, int> Owners = new Dictionary<uint, int>();
+    private static readonly HashSet<uint> Removed = new HashSet<uint>();
+    private static bool sendErrorLogged;
+
+    internal static void Reset()
+    {
+        Owners.Clear();
+        Removed.Clear();
+        sendErrorLogged = false;
+    }
+
+    internal static bool Send(uint objectIndex, int raftId, bool remove)
+    {
+        if (!Raft_Network.IsHost)
+            return false;
+        if (Raft_Network.InSinglePlayerMode)
+            return true;
+
+        try
+        {
+            if (SendPayload == null)
+                throw new MissingMethodException("RebuildableRaft.SendNetworkPayload");
+
+            SendPayload.Invoke(null, new object[] {
+                new Message_SecondaryRaftSharkOwner {
+                    objectIndex = objectIndex, raftId = raftId, remove = remove
+                }, EP2PSend.k_EP2PSendReliable
+            });
+            sendErrorLogged = false;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (!sendErrorLogged)
+                Debug.LogWarning("[Second Raft] Shark sync failed: " + ex.Message);
+            sendErrorLogged = true;
+            return false;
+        }
+    }
+
+    internal static void BroadcastOwner(SecondaryRaftSharkBinding binding)
+    {
+        if (binding == null || binding.RemovalRequested || binding.RaftId < 0)
+            return;
+        AI_NetworkBehaviour behaviour = binding.NetworkBehaviour;
+        if (behaviour != null)
+            Send(behaviour.ObjectIndex, binding.RaftId, false);
+    }
+
+    internal static void ApplyClientOwner(AI_NetworkBehaviour behaviour,
+        SecondaryRaftSharkBinding binding)
+    {
+        if (behaviour == null || binding == null || Raft_Network.IsHost)
+            return;
+        uint id = behaviour.ObjectIndex;
+        if (Removed.Contains(id))
+        {
+            binding.DespawnLocal();
+            return;
+        }
+        int raftId;
+        if (Owners.TryGetValue(id, out raftId))
+            binding.Assign(raftId);
+    }
+
+    internal static void Receive(Message_SecondaryRaftSharkOwner msg, Network_UserId from)
+    {
+        Raft_Network network = ComponentManager<Raft_Network>.Value;
+        if (Raft_Network.IsHost || network == null || from != network.HostID ||
+            SecondaryRaftSharkSession.IsLeavingWorld || GameManager.IsLeavingGame ||
+            !RAPI.IsCurrentSceneGame())
+            return;
+
+        if (msg.remove)
+        {
+            Owners.Remove(msg.objectIndex);
+            Removed.Add(msg.objectIndex);
+        }
+        else if (msg.raftId >= 0 && !Removed.Contains(msg.objectIndex))
+            Owners[msg.objectIndex] = msg.raftId;
+
+        // Сообщение может прийти раньше штатного создания сущности
+        AI_NetworkBehaviour behaviour = NetworkIDManager.GetNetworkIDFromObjectIndex<AI_NetworkBehaviour>(msg.objectIndex);
+        if (behaviour == null || behaviour.behaviourType != AI_NetworkBehaviourType.Shark)
+            return;
+        AI_StateMachine_Shark shark = SecondaryRaftSharkLogic.FindMachine(behaviour);
+        if (shark == null)
+            return;
+        SecondaryRaftSharkBinding binding = SecondaryRaftSharkLogic.GetBinding(shark);
+        if (binding == null)
+            binding = shark.gameObject.AddComponent<SecondaryRaftSharkBinding>();
+        ApplyClientOwner(behaviour, binding);
+    }
+}
+
+// Канал мода используется без замены Main.cs
+[HarmonyPatch(typeof(RebuildableRaft), "OnNetworkMessage")]
+internal static class SecondaryRaftSharkWireReceive
+{
+    [HarmonyPrefix]
+    private static bool Prefix(object message, Network_UserId from, string channel, ref bool __result)
+    {
+        Message_SecondaryRaftSharkOwner msg = message as Message_SecondaryRaftSharkOwner;
+        if (channel != RebuildableRaft.MultiRaftNetworkChannel || msg == null)
+            return true;
+        SecondaryRaftSharkWire.Receive(msg, from);
+        __result = true;
+        return false;
     }
 }
 
@@ -234,8 +357,9 @@ internal static class SecondaryRaftSharkLogic
 
     internal static void DespawnForRaft(int raftId)
     {
-        if (raftId <= 0 || SaveAndLoad.IsGameLoading ||
-            SecondaryRaftSharkSession.IsLeavingWorld)
+        if (raftId <= 0 || !Raft_Network.IsHost ||
+            !Raft_Network.WorldHasBeenRecieved ||
+            !SecondaryRaftSharkSession.CanProcessSharkDamage)
             return;
 
         SecondaryRaftSharkBinding[] bindings =
@@ -277,93 +401,48 @@ internal static class SecondaryRaftSharkLogic
         return machine;
     }
 
-    internal static void TrackSpawn(AI_NetworkBehaviour behaviour, Vector3 position)
+    internal static AI_StateMachine_Shark FindMachine(AI_NetworkBehaviour behaviour)
     {
         if (behaviour == null)
-            return;
-
+            return null;
         AI_StateMachine_Shark shark = behaviour.GetComponent<AI_StateMachine_Shark>();
-        if (shark == null)
-            shark = behaviour.GetComponentInChildren<AI_StateMachine_Shark>();
+        return shark != null ? shark : behaviour.GetComponentInChildren<AI_StateMachine_Shark>(true);
+    }
+
+    internal static void TrackSpawn(AI_NetworkBehaviour behaviour, Vector3 position)
+    {
+        AI_StateMachine_Shark shark = FindMachine(behaviour);
         if (shark == null)
             return;
 
         SecondaryRaftSharkBinding binding = GetBinding(shark);
         if (binding == null)
             binding = shark.gameObject.AddComponent<SecondaryRaftSharkBinding>();
-
         binding.InitialSpawnPosition = position;
 
         if (Raft_Network.IsHost && InHostFactoryCall)
-        {
             binding.Assign(Mathf.Max(0, PendingRaftId));
-            return;
-        }
-
-        // При сетевом создании принадлежность восстанавливается по точке появления
-        SecondaryRaftRoot root = FindRootAtSpawn(position, 14f);
-        if (root != null)
-        {
-            binding.Assign(root.RaftId);
-            return;
-        }
-
-        if (!Raft_Network.IsHost || IsNearAnySecondarySpawnHeight(position))
-            binding.RaftId = -1;
-        else
-            binding.Assign(ClassifyRestoredShark(position));
-    }
-
-    private static bool IsNearAnySecondarySpawnHeight(Vector3 position)
-    {
-        foreach (SecondaryRaftRoot root in MultiRaftRegistry.GetRoots())
-        {
-            if (root != null &&
-                Mathf.Abs(position.y - (root.BuildPivot.position.y - 10f)) < 5f &&
-                Vector3.Distance(position, root.BuildPivot.position + Vector3.down * 10f) < 45f)
-                return true;
-        }
-        return false;
-    }
-
-    internal static SecondaryRaftRoot FindRootAtSpawn(Vector3 position, float tolerance)
-    {
-        SecondaryRaftRoot closest = null;
-        float best = tolerance * tolerance;
-
-        foreach (SecondaryRaftRoot root in MultiRaftRegistry.GetRoots())
-        {
-            if (root == null || !root.HasPlacedBlocks)
-                continue;
-
-            Vector3 expected = root.BuildPivot.position + Vector3.down * 10f;
-            float dy = Mathf.Abs(expected.y - position.y);
-            if (dy > 6f)
-                continue;
-
-            float dx = expected.x - position.x;
-            float dz = expected.z - position.z;
-            float distance = dx * dx + dz * dz;
-            if (distance < best)
-            {
-                closest = root;
-                best = distance;
-            }
-        }
-
-        return closest;
+        else if (!Raft_Network.IsHost)
+            SecondaryRaftSharkWire.ApplyClientOwner(behaviour, binding);
+        // Восстановленная акула распределяется хостом после загрузки плотов
     }
 
     internal static int ClassifyRestoredShark(Vector3 position)
     {
         Transform main = MultiRaftRegistry.MainPivot;
-        Vector3 mainDelta = main != null
-            ? main.position - position
-            : Vector3.zero;
-        float best = main != null
-            ? mainDelta.x * mainDelta.x + mainDelta.z * mainDelta.z
-            : float.MaxValue;
-        int owner = 0;
+        bool primaryExists = main != null && MultiRaftRegistry.HasPrimaryBlocks();
+        float best = 60f * 60f;
+        int owner = -1;
+        if (primaryExists)
+        {
+            Vector3 mainDelta = main.position - position;
+            float distance = mainDelta.x * mainDelta.x + mainDelta.z * mainDelta.z;
+            if (distance < best)
+            {
+                best = distance;
+                owner = 0;
+            }
+        }
 
         foreach (SecondaryRaftRoot root in MultiRaftRegistry.GetRoots())
         {
@@ -562,15 +641,34 @@ internal static class SecondaryRaftSharkHostStart
 internal static class SecondaryRaftSharkFactoryScope
 {
     [HarmonyPrefix]
-    private static void Prefix()
+    private static bool Prefix(Network_Host_Entities __instance,
+        AI_NetworkBehaviourType behaviourType, ref bool __state)
     {
+        __state = SecondaryRaftSharkLogic.InHostFactoryCall;
         SecondaryRaftSharkLogic.InHostFactoryCall = Raft_Network.IsHost;
+
+        // Отложенный штатный респавн не создаёт акул без плота
+        if (Raft_Network.IsHost && behaviourType == AI_NetworkBehaviourType.Shark &&
+            Raft_Network.WorldHasBeenRecieved && !SaveAndLoad.IsGameLoading &&
+            SecondaryRaftSharkLogic.PendingRaftId < 0 &&
+            __instance.GetComponent<SecondaryRaftSharkManager>() != null)
+            return false;
+        return true;
+    }
+
+    [HarmonyPostfix]
+    private static void Postfix(AI_NetworkBehaviourType behaviourType, AI_NetworkBehaviour __result)
+    {
+        if (Raft_Network.IsHost && behaviourType == AI_NetworkBehaviourType.Shark &&
+            __result != null && Raft_Network.WorldHasBeenRecieved)
+            SecondaryRaftSharkWire.BroadcastOwner(SecondaryRaftSharkLogic.GetBinding(
+                SecondaryRaftSharkLogic.FindMachine(__result)));
     }
 
     [HarmonyFinalizer]
-    private static Exception Finalizer(Exception __exception)
+    private static Exception Finalizer(Exception __exception, bool __state)
     {
-        SecondaryRaftSharkLogic.InHostFactoryCall = false;
+        SecondaryRaftSharkLogic.InHostFactoryCall = __state;
         return __exception;
     }
 }
@@ -612,7 +710,7 @@ internal static class SecondaryRaftSharkPlayerOnRaft
 
         SecondaryRaftSharkBinding binding =
             SecondaryRaftSharkLogic.GetBinding(__instance);
-        if (binding == null || binding.RaftId <= 0)
+        if (binding == null || binding.RaftId <= 0 || !Raft_Network.IsHost)
             return true;
 
         // ИИ дополнительной акулы не обновляется во время загрузки мира
@@ -886,13 +984,12 @@ internal static class SecondaryRaftSharkDisableVanillaRespawn
         if (!Raft_Network.IsHost)
             return true;
 
-        foreach (SecondaryRaftRoot root in MultiRaftRegistry.GetRoots())
+        Network_Host_Entities entities = ComponentManager<Network_Host_Entities>.Value;
+        if (entities != null && entities.GetComponent<SecondaryRaftSharkManager>() != null &&
+            Raft_Network.WorldHasBeenRecieved)
         {
-            if (root != null && root.HasPlacedBlocks)
-            {
-                __result = false;
-                return false;
-            }
+            __result = false;
+            return false;
         }
 
         return true;
@@ -933,7 +1030,7 @@ public sealed class SecondaryRaftSharkManager : MonoBehaviour
     {
         if (!Raft_Network.IsHost ||
             !SecondaryRaftSharkSession.CanProcessSharkDamage ||
-            !SecondaryRaftSharkLogic.SharksEnabled(entities) ||
+            !Raft_Network.WorldHasBeenRecieved ||
             Time.realtimeSinceStartup < firstCheck ||
             Time.realtimeSinceStartup < nextCheck)
             return;
@@ -947,6 +1044,28 @@ public sealed class SecondaryRaftSharkManager : MonoBehaviour
         AI_StateMachine_Shark[] sharks =
             UnityEngine.Object.FindObjectsOfType<AI_StateMachine_Shark>();
         HashSet<int> aliveOwners = new HashSet<int>();
+        HashSet<int> existingOwners = new HashSet<int>();
+        bool primaryExists = MultiRaftRegistry.HasPrimaryBlocks();
+        if (primaryExists)
+            existingOwners.Add(0);
+        foreach (SecondaryRaftRoot root in MultiRaftRegistry.GetRoots())
+            if (root != null && root.HasPlacedBlocks)
+                existingOwners.Add(root.RaftId);
+
+        // Подтверждённые привязки имеют приоритет над восстановленными по координатам
+        Array.Sort(sharks, delegate(AI_StateMachine_Shark a, AI_StateMachine_Shark b)
+        {
+            SecondaryRaftSharkBinding ba = SecondaryRaftSharkLogic.GetBinding(a);
+            SecondaryRaftSharkBinding bb = SecondaryRaftSharkLogic.GetBinding(b);
+            int pa = ba != null && ba.RaftId >= 0 ? 0 : 1;
+            int pb = bb != null && bb.RaftId >= 0 ? 0 : 1;
+            int priority = pa.CompareTo(pb);
+            if (priority != 0)
+                return priority;
+            uint ia = a != null && a.networkBehaviour != null ? a.networkBehaviour.ObjectIndex : uint.MaxValue;
+            uint ib = b != null && b.networkBehaviour != null ? b.networkBehaviour.ObjectIndex : uint.MaxValue;
+            return ia.CompareTo(ib);
+        });
 
         for (int i = 0; i < sharks.Length; i++)
         {
@@ -954,47 +1073,54 @@ public sealed class SecondaryRaftSharkManager : MonoBehaviour
             if (shark == null)
                 continue;
 
-            SecondaryRaftSharkBinding binding =
-                SecondaryRaftSharkLogic.GetBinding(shark);
-
+            SecondaryRaftSharkBinding binding = SecondaryRaftSharkLogic.GetBinding(shark);
             if (binding == null)
             {
                 binding = shark.gameObject.AddComponent<SecondaryRaftSharkBinding>();
                 binding.InitialSpawnPosition = shark.transform.position;
-                binding.Assign(SecondaryRaftSharkLogic.ClassifyRestoredShark(
-                    shark.transform.position));
             }
-            else if (binding.RaftId < 0)
-            {
-                binding.Assign(SecondaryRaftSharkLogic.ClassifyRestoredShark(
-                    binding.InitialSpawnPosition));
-            }
+            if (binding.RemovalRequested)
+                continue;
 
-            if (binding.RaftId > 0 && binding.OwnerUnavailable())
+            if (binding.RaftId < 0)
+                binding.Assign(SecondaryRaftSharkLogic.ClassifyRestoredShark(shark.transform.position));
+
+            if (!existingOwners.Contains(binding.RaftId))
             {
-                if (binding.ShouldDespawn())
-                    binding.Despawn();
+                binding.Despawn();
                 continue;
             }
 
-            if (IsDeadOrDecaying(shark))
+            if (!IsDeadOrDecaying(shark) && !aliveOwners.Add(binding.RaftId))
+            {
+                binding.Despawn();
                 continue;
+            }
 
-            aliveOwners.Add(binding.RaftId);
             previouslyCovered.Add(binding.RaftId);
+            SecondaryRaftSharkWire.BroadcastOwner(binding);
         }
 
-        bool hasSecondary = false;
+        // Таймеры уничтоженных плотов не сохраняются
+        previouslyCovered.RemoveWhere(id => !existingOwners.Contains(id));
+        List<int> obsolete = new List<int>();
+        foreach (int id in missingUntil.Keys)
+            if (!existingOwners.Contains(id))
+                obsolete.Add(id);
+        foreach (int id in obsolete)
+            missingUntil.Remove(id);
+
+        if (!SecondaryRaftSharkLogic.SharksEnabled(entities))
+            return;
+
         foreach (SecondaryRaftRoot root in MultiRaftRegistry.GetRoots())
         {
             if (root == null || !root.HasPlacedBlocks || !root.IsNetworkPoseReady)
                 continue;
-
-            hasSecondary = true;
             EnsureShark(root.RaftId, root, aliveOwners);
         }
 
-        if (hasSecondary && MultiRaftRegistry.HasPrimaryBlocks())
+        if (primaryExists)
             EnsureShark(0, null, aliveOwners);
     }
 
@@ -1047,6 +1173,18 @@ public sealed class SecondaryRaftSharkManager : MonoBehaviour
 
         if (created != null)
         {
+            AI_StateMachine_Shark shark = SecondaryRaftSharkLogic.FindMachine(created);
+            if (shark != null)
+            {
+                SecondaryRaftSharkBinding binding = SecondaryRaftSharkLogic.GetBinding(shark);
+                if (binding == null || binding.RaftId != raftId)
+                {
+                    if (binding == null)
+                        binding = shark.gameObject.AddComponent<SecondaryRaftSharkBinding>();
+                    binding.Assign(raftId);
+                    SecondaryRaftSharkWire.BroadcastOwner(binding);
+                }
+            }
             previouslyCovered.Add(raftId);
             missingUntil.Remove(raftId);
             aliveOwners.Add(raftId);

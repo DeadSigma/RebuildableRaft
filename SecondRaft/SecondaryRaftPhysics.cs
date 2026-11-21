@@ -14,7 +14,6 @@ using UnityEngine;
 public static class SecondaryRaftWaterSampler
 {
     private static Water water;
-    private static WaterSample sample;
 
     public static bool TryGetSurfaceY(
         Vector3 worldPosition,
@@ -39,27 +38,16 @@ public static class SecondaryRaftWaterSampler
                 water = gameManager.water;
             }
 
-            if (sample == null)
-            {
-                sample =
-                    new WaterSample(
-                        water,
-                        (WaterSample.DisplacementMode)0,
-                        0.2f
-                    );
+            // Высота запрашивается непосредственно в нужной точке
+            float sampledHeight = water.GetHeightAt(
+                worldPosition.x,
+                worldPosition.z
+            );
 
-                sample.Start(worldPosition);
-            }
-
-            Vector3 surface =
-                sample.GetAndReset(
-                    worldPosition.x,
-                    worldPosition.z,
-                    WaterSample.ComputationsMode
-                        .ForceCompletion
-                );
-
-            surfaceY = surface.y + offset;
+            surfaceY =
+                water.transform.position.y +
+                sampledHeight +
+                offset;
 
             return !float.IsNaN(surfaceY) &&
                    !float.IsInfinity(surfaceY);
@@ -72,22 +60,9 @@ public static class SecondaryRaftWaterSampler
 
     public static void Reset()
     {
-        if (sample != null)
-        {
-            try
-            {
-                sample.Stop();
-            }
-            catch
-            {
-            }
-        }
-
-        sample = null;
         water = null;
     }
 }
-
 
 public class SecondaryRaftCollisionRelay : MonoBehaviour
 {
@@ -772,9 +747,7 @@ public class SecondaryRaftRoot : MonoBehaviour
         collisionBody.useGravity = false;
         collisionBody.isKinematic = true;
         collisionBody.detectCollisions = true;
-        collisionBody.interpolation = Raft_Network.IsHost
-            ? RigidbodyInterpolation.Interpolate
-            : RigidbodyInterpolation.None;
+        collisionBody.interpolation = RigidbodyInterpolation.None;
 
         SecondaryRaftCollisionRelay relay =
             wavePivot.GetComponent
@@ -885,10 +858,13 @@ public class SecondaryRaftRoot : MonoBehaviour
             return;
         }
 
-        if (Raft_Network.IsHost ||
-            hasNetworkState)
+        if (Raft_Network.IsHost)
         {
             UpdateWaveTilt();
+        }
+        else if (hasNetworkState)
+        {
+            ApplyNetworkWaveTilt();
         }
 
         Physics.SyncTransforms();
@@ -1133,12 +1109,14 @@ public class SecondaryRaftRoot : MonoBehaviour
                 networkRoll
             );
 
+        float follow = 1f - Mathf.Exp(
+            -NetworkLerpSpeed * Time.deltaTime);
+
         wavePivot.localRotation =
             Quaternion.Slerp(
                 wavePivot.localRotation,
                 targetLocal,
-                Time.deltaTime *
-                NetworkLerpSpeed
+                follow
             );
     }
 
@@ -1715,11 +1693,7 @@ public class SecondaryRaftRoot : MonoBehaviour
         Vector3 position =
             new Vector3(
                 flatPosition.x,
-                ResolveClientWaterY(
-                    flatPosition,
-                    transform.position.y,
-                    false
-                ),
+                transform.position.y,
                 flatPosition.z
             );
 

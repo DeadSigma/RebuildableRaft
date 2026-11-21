@@ -14,6 +14,15 @@ public class SecondaryRaftBlockRayProxy : MonoBehaviour
 {
 }
 
+public static class SecondaryRaftInteractionScope
+{
+    [ThreadStatic]
+    public static Block_CookingStand CurrentCookingStand;
+
+    [ThreadStatic]
+    public static bool CheckingWaterAim;
+}
+
 public static class SecondaryRaftInteraction
 {
     private const float ProxyPadding = 0.08f;
@@ -26,6 +35,7 @@ public static class SecondaryRaftInteraction
         Block block)
     {
         if (block == null ||
+            !block.hasBeenPlaced ||
             !MultiRaftRegistry.IsSecondaryBlock(block))
         {
             return;
@@ -93,6 +103,323 @@ public static class SecondaryRaftInteraction
             distance,
             triggerMode
         );
+    }
+
+    public static bool TryFindCompletedCookingSlotHit(
+        Block_CookingStand stand,
+        float distance,
+        out RaycastHit selectedHit)
+    {
+        selectedHit = default(RaycastHit);
+
+        if (stand == null ||
+            !stand.hasBeenPlaced ||
+            !stand.gameObject.activeInHierarchy ||
+            !MultiRaftRegistry.IsSecondaryBlock(stand) ||
+            stand.cookingSlots == null ||
+            Helper.MainCamera == null)
+        {
+            return false;
+        }
+
+        Ray ray = Helper.MainCamera.ScreenPointToRay(
+            new Vector3(Screen.width * 0.5f, Screen.height * 0.5f)
+        );
+
+        // Готовые слоты проверяются независимо от слоя их коллайдера
+        RaycastHit[] hits = Physics.RaycastAll(
+            ray,
+            distance,
+            ~0,
+            QueryTriggerInteraction.Collide
+        );
+
+        SortHits(hits);
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            if (hits[i].collider == null)
+            {
+                continue;
+            }
+
+            CookingSlot slot =
+                hits[i].collider.GetComponent<CookingSlot>();
+
+            if (slot == null ||
+                !slot.gameObject.activeInHierarchy ||
+                !slot.IsBusy ||
+                !slot.IsComplete)
+            {
+                continue;
+            }
+
+            for (int j = 0; j < stand.cookingSlots.Length; j++)
+            {
+                if (stand.cookingSlots[j] == slot)
+                {
+                    selectedHit = hits[i];
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public static CookingSlot FindCompletedCookingSlotAtCursor(
+        Block_CookingStand stand,
+        float distance)
+    {
+        if (stand == null ||
+            !stand.hasBeenPlaced ||
+            !MultiRaftRegistry.IsSecondaryBlock(stand) ||
+            stand.cookingSlots == null ||
+            Helper.MainCamera == null)
+        {
+            return null;
+        }
+
+        bool hasCompletedSlot = false;
+        for (int i = 0; i < stand.cookingSlots.Length; i++)
+        {
+            if (IsCompletedSlotOfStand(stand, stand.cookingSlots[i]))
+            {
+                hasCompletedSlot = true;
+                break;
+            }
+        }
+
+        if (!hasCompletedSlot)
+        {
+            return null;
+        }
+
+        RaycastHit directHit;
+        if (TryFindCompletedCookingSlotHit(
+            stand,
+            distance,
+            out directHit))
+        {
+            CookingSlot directSlot = directHit.collider != null
+                ? directHit.collider.GetComponentInParent<CookingSlot>()
+                : null;
+
+            if (IsCompletedSlotOfStand(stand, directSlot))
+            {
+                return directSlot;
+            }
+        }
+
+        Ray ray = Helper.MainCamera.ScreenPointToRay(
+            new Vector3(Screen.width * 0.5f, Screen.height * 0.5f)
+        );
+
+        // Несовпадение коллайдера и модели компенсируется узким SphereCast
+        RaycastHit[] nearHits = Physics.SphereCastAll(
+            ray,
+            0.12f,
+            distance,
+            ~0,
+            QueryTriggerInteraction.Collide
+        );
+
+        SortHits(nearHits);
+
+        for (int i = 0; i < nearHits.Length; i++)
+        {
+            CookingSlot nearSlot = nearHits[i].collider != null
+                ? nearHits[i].collider.GetComponentInParent<CookingSlot>()
+                : null;
+
+            if (IsCompletedSlotOfStand(stand, nearSlot))
+            {
+                return nearSlot;
+            }
+        }
+
+        CookingSlot bestSlot = null;
+        float bestScore = float.MaxValue;
+
+        for (int i = 0; i < stand.cookingSlots.Length; i++)
+        {
+            CookingSlot slot = stand.cookingSlots[i];
+            if (!IsCompletedSlotOfStand(stand, slot))
+            {
+                continue;
+            }
+
+            // Визуальные модели готового предмета учитываются без Raycast
+            Renderer[] renderers = slot.GetComponentsInChildren<Renderer>(true);
+            for (int j = 0; j < renderers.Length; j++)
+            {
+                Renderer renderer = renderers[j];
+                if (renderer == null ||
+                    !renderer.enabled ||
+                    !renderer.gameObject.activeInHierarchy)
+                {
+                    continue;
+                }
+
+                float hitDistance;
+                if (!renderer.bounds.IntersectRay(ray, out hitDistance) ||
+                    hitDistance < 0f || hitDistance > distance)
+                {
+                    continue;
+                }
+
+                if (hitDistance < bestScore)
+                {
+                    bestScore = hitDistance;
+                    bestSlot = slot;
+                }
+            }
+
+            // Положение слота используется, если модель не имеет коллайдера
+            Vector3 toSlot = slot.transform.position - ray.origin;
+            float alongRay = Vector3.Dot(toSlot, ray.direction);
+            if (alongRay <= 0f || alongRay > distance)
+            {
+                continue;
+            }
+
+            float perpendicular = Vector3.Distance(
+                slot.transform.position,
+                ray.GetPoint(alongRay)
+            );
+
+            if (perpendicular > 0.34f)
+            {
+                continue;
+            }
+
+            float score = alongRay + perpendicular * 0.25f;
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestSlot = slot;
+            }
+        }
+
+        return bestSlot;
+    }
+
+    private static bool IsCompletedSlotOfStand(
+        Block_CookingStand stand,
+        CookingSlot slot)
+    {
+        if (stand == null ||
+            slot == null ||
+            !slot.gameObject.activeInHierarchy ||
+            !slot.IsBusy ||
+            !slot.IsComplete ||
+            stand.cookingSlots == null)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < stand.cookingSlots.Length; i++)
+        {
+            if (stand.cookingSlots[i] == slot)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static bool CanFillWaterFromSecondaryRaft()
+    {
+        Network_Player player = ComponentManager<Network_Player>.Value;
+        SecondaryRaftRoot root = player != null
+            ? MultiRaftRegistry.GetRootFromTransform(player.transform)
+            : null;
+
+        if (player == null || !player.IsLocalPlayer ||
+            root == null || Helper.MainCamera == null)
+        {
+            return false;
+        }
+
+        Ray ray = Helper.MainCamera.ScreenPointToRay(
+            new Vector3(Screen.width * 0.5f, Screen.height * 0.5f)
+        );
+
+        Plane waterPlane = new Plane(Vector3.up, Vector3.zero);
+        float waterDistance;
+        float maxDistance = Player.UseDistance * 1.5f;
+
+        if (!waterPlane.Raycast(ray, out waterDistance) ||
+            waterDistance >= maxDistance)
+        {
+            return false;
+        }
+
+        // Водоёмы с исключающим объёмом сохраняют ванильную проверку
+        int volumeCount = Physics.OverlapSphereNonAlloc(
+            ray.GetPoint(waterDistance),
+            0.01f,
+            UltimateWater.Water._CollidersBuffer,
+            1 << UltimateWater.WaterProjectSettings.Instance.WaterCollidersLayer,
+            QueryTriggerInteraction.Collide
+        );
+
+        for (int i = 0; i < volumeCount; i++)
+        {
+            UltimateWater.WaterVolumeBase volume =
+                UltimateWater.WaterVolumeBase.GetWaterVolume(
+                    UltimateWater.Water._CollidersBuffer[i]
+                );
+
+            if (volume is UltimateWater.WaterVolumeSubtract)
+            {
+                return false;
+            }
+        }
+
+        RaycastHit[] obstacles = Physics.RaycastAll(
+            ray,
+            maxDistance,
+            LayerMasks.MASK_Water_with_obstruction,
+            QueryTriggerInteraction.UseGlobal
+        );
+
+        for (int i = 0; i < obstacles.Length; i++)
+        {
+            Collider collider = obstacles[i].collider;
+            if (collider == null)
+            {
+                continue;
+            }
+
+            if (IsSecondaryRaftPhysicsOnlyCollider(collider, root))
+            {
+                continue;
+            }
+
+            // Реальные препятствия и блоки не игнорируются
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsSecondaryRaftPhysicsOnlyCollider(
+        Collider collider,
+        SecondaryRaftRoot root)
+    {
+        if (collider == null || root == null ||
+            MultiRaftRegistry.GetRootFromTransform(collider.transform) != root)
+        {
+            return false;
+        }
+
+        return collider.GetComponent<SecondaryRaftCollisionProxy>() != null ||
+            collider.GetComponent<SecondaryRaftBodyCollisionProxy>() != null ||
+            collider.GetComponent<SecondaryRaftInteractionProxy>() != null ||
+            collider.GetComponent<SecondaryRaftBlockRayProxy>() != null ||
+            collider.gameObject.name == "SecondRaftHullCell";
     }
 
     public static bool TryFindSecondaryBlockHit(
@@ -731,6 +1058,8 @@ public static class SecondaryRaftInteraction
                 colliders[i];
 
             if (collider == null ||
+                !collider.enabled ||
+                !collider.gameObject.activeInHierarchy ||
                 collider.GetComponent
                     <SecondaryRaftInteractionProxy>() !=
                     null ||
@@ -975,6 +1304,7 @@ public static class SecondaryRaftInteraction
         }
 
         if (block == null ||
+            !block.hasBeenPlaced ||
             !MultiRaftRegistry.IsSecondaryBlock(block))
         {
             return null;
@@ -994,7 +1324,7 @@ public static class SecondaryRaftInteraction
                 ray,
                 distance,
                 LayerMasks.MASK_RaycastInteractable,
-                QueryTriggerInteraction.Collide
+                triggerMode
             );
 
         SortHits(hits);
@@ -1068,6 +1398,7 @@ public static class SecondaryRaftInteraction
             collider.GetComponentInParent<Block>();
 
         if (block == null ||
+            !block.hasBeenPlaced ||
             !MultiRaftRegistry
                 .IsSecondaryBlock(block))
         {
@@ -1118,8 +1449,9 @@ public static class SecondaryRaftInteraction
 
         if (block != null)
         {
-            return MultiRaftRegistry
-                .IsSecondaryBlock(block);
+            return block.hasBeenPlaced &&
+                MultiRaftRegistry
+                    .IsSecondaryBlock(block);
         }
 
         return MultiRaftRegistry
@@ -1168,7 +1500,15 @@ public static class Helper_FindInteractable_RebuildableRaft
     {
         if (__result != null)
         {
-            return;
+            Block block =
+                __result.GetComponentInParent<Block>();
+
+            if (block == null || block.hasBeenPlaced)
+            {
+                return;
+            }
+
+            __result = null;
         }
 
         __result =
@@ -1177,6 +1517,124 @@ public static class Helper_FindInteractable_RebuildableRaft
                     __0,
                     __1
                 );
+    }
+}
+
+[HarmonyPatch(typeof(Block_CookingStand), "OnIsRayed")]
+public static class Block_CookingStand_OnIsRayed_RebuildableRaft
+{
+    private static readonly Dictionary<Type, MethodInfo> CollectMethods =
+        new Dictionary<Type, MethodInfo>();
+
+    [HarmonyPrefix]
+    public static bool Prefix(
+        Block_CookingStand __instance,
+        ref DisplayTextManager ___displayTextManager,
+        ref Network_Player ___playerNetwork)
+    {
+        // Предпросмотр не обрабатывается как установленный прибор
+        if (__instance == null || !__instance.hasBeenPlaced)
+        {
+            return false;
+        }
+
+        if (___displayTextManager == null)
+        {
+            ___displayTextManager =
+                ComponentManager<DisplayTextManager>.Value;
+        }
+
+        if (___displayTextManager == null)
+        {
+            return false;
+        }
+
+        if (!MultiRaftRegistry.IsSecondaryBlock(__instance))
+        {
+            return true;
+        }
+
+        SecondaryRaftInteractionScope.CurrentCookingStand = __instance;
+
+        if (___playerNetwork == null)
+        {
+            return true;
+        }
+
+        if (CanvasHelper.ActiveMenu != MenuType.None ||
+            !Helper.LocalPlayerIsWithinDistance(
+                __instance.transform.position,
+                Player.UseDistance))
+        {
+            return true;
+        }
+
+        CookingSlot completedSlot = SecondaryRaftInteraction
+            .FindCompletedCookingSlotAtCursor(__instance, Player.UseDistance);
+
+        if (completedSlot == null)
+        {
+            return true;
+        }
+
+        Type standType = __instance.GetType();
+        MethodInfo collectMethod;
+
+        if (!CollectMethods.TryGetValue(standType, out collectMethod))
+        {
+            collectMethod = AccessTools.Method(
+                standType,
+                "CheckForCollecting",
+                new Type[] { typeof(CookingSlot) }
+            );
+
+            if (collectMethod == null)
+            {
+                collectMethod = AccessTools.Method(
+                    typeof(Block_CookingStand),
+                    "CheckForCollecting",
+                    new Type[] { typeof(CookingSlot) }
+                );
+            }
+
+            CollectMethods[standType] = collectMethod;
+        }
+
+        if (collectMethod == null)
+        {
+            return true;
+        }
+
+        // Штатная обработка выполняется с сохранением сетевых сообщений
+        collectMethod.Invoke(__instance, new object[] { completedSlot });
+        return false;
+    }
+
+    [HarmonyPostfix]
+    public static void Postfix()
+    {
+        SecondaryRaftInteractionScope.CurrentCookingStand = null;
+    }
+
+    [HarmonyFinalizer]
+    public static Exception Finalizer(Exception __exception)
+    {
+        SecondaryRaftInteractionScope.CurrentCookingStand = null;
+        return __exception;
+    }
+}
+
+[HarmonyPatch(typeof(Block_CookingStand), "OnRayExit")]
+public static class Block_CookingStand_OnRayExit_RebuildableRaft
+{
+    [HarmonyPrefix]
+    public static bool Prefix(
+        Block_CookingStand __instance,
+        ref DisplayTextManager ___displayTextManager)
+    {
+        return __instance != null &&
+            __instance.hasBeenPlaced &&
+            ___displayTextManager != null;
     }
 }
 
@@ -1219,21 +1677,46 @@ public static class Helper_HitAtCursor_RebuildableRaft
         QueryTriggerInteraction __3,
         ref bool __result)
     {
-        if (__result ||
-            (__2.value &
-                LayerMasks.MASK_Block.value) == 0)
+        Block_CookingStand cookingStand =
+            SecondaryRaftInteractionScope.CurrentCookingStand;
+
+        if (cookingStand != null &&
+            __2.value == LayerMasks.MASK_Item.value)
+        {
+            CookingSlot vanillaSlot = __0.collider != null
+                ? __0.collider.GetComponent<CookingSlot>()
+                : null;
+
+            if (__result && vanillaSlot != null &&
+                vanillaSlot.IsBusy && vanillaSlot.IsComplete &&
+                cookingStand.cookingSlots != null &&
+                Array.IndexOf(cookingStand.cookingSlots, vanillaSlot) >= 0)
+            {
+                return;
+            }
+
+            RaycastHit slotHit;
+            if (SecondaryRaftInteraction.TryFindCompletedCookingSlotHit(
+                cookingStand, __1, out slotHit))
+            {
+                __0 = slotHit;
+                __result = true;
+            }
+
+            return;
+        }
+
+        // Водная проверка не подменяется поиском блоков
+        if (SecondaryRaftInteractionScope.CheckingWaterAim ||
+            __result ||
+            (__2.value & LayerMasks.MASK_Block.value) == 0)
         {
             return;
         }
 
         RaycastHit hit;
-
-        if (SecondaryRaftInteraction
-            .TryFindSecondaryBlockHit(
-                out hit,
-                __1,
-                __3
-            ))
+        if (SecondaryRaftInteraction.TryFindSecondaryBlockHit(
+            out hit, __1, __3))
         {
             __0 = hit;
             __result = true;
@@ -1329,6 +1812,35 @@ public static class Helper_HitAllAtCursor_RebuildableRaft
 
         __0 = result;
         __result = result.Length > 0;
+    }
+}
+
+[HarmonyPatch(typeof(FillWaterComponent), "AimingAtTarget")]
+public static class FillWaterComponent_AimingAtTarget_RebuildableRaft
+{
+    [HarmonyPrefix]
+    public static void Prefix()
+    {
+        SecondaryRaftInteractionScope.CheckingWaterAim = true;
+    }
+
+    [HarmonyPostfix]
+    public static void Postfix(ref bool __result)
+    {
+        SecondaryRaftInteractionScope.CheckingWaterAim = false;
+
+        if (!__result)
+        {
+            __result = SecondaryRaftInteraction
+                .CanFillWaterFromSecondaryRaft();
+        }
+    }
+
+    [HarmonyFinalizer]
+    public static Exception Finalizer(Exception __exception)
+    {
+        SecondaryRaftInteractionScope.CheckingWaterAim = false;
+        return __exception;
     }
 }
 

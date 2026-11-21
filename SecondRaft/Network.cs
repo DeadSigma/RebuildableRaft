@@ -133,20 +133,8 @@ public static class Message_Player_Update_Constructor_RebuildableRaft
             return;
         }
 
-        Transform mainPivot =
-            MultiRaftRegistry.MainPivot;
-
-        if (mainPivot != null)
-        {
-            __instance.RaftAsParent = true;
-            __instance.Position = mainPivot.InverseTransformPoint(
-                personController.transform.position
-            );
-        }
-        else
-        {
-            __instance.RaftAsParent = false;
-            __instance.Position = personController.transform.position;
-        }
+        // Второй плот передаёт мировые координаты без наклона основного плота
+        __instance.RaftAsParent = false;
+        __instance.Position = personController.transform.position;
     }
 }

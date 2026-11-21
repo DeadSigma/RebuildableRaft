@@ -54,6 +54,7 @@ public class RebuildableRaft : Mod
         RaftNameRegistry.Reset();
         PlayerRaftPersistence.Reset();
         PlayerRaftRespawn.Reset();
+        SecondaryRaftLootSpawner.Reset();
 
         harmony = new Harmony("el.rebuildableraft.multiraft");
         harmony.PatchAll();
@@ -76,6 +77,8 @@ public class RebuildableRaft : Mod
         {
             return;
         }
+
+        SecondaryRaftLootSpawner.Update();
 
         networkSyncTimer += Time.deltaTime;
         raftNameSyncTimer += Time.deltaTime;
@@ -101,6 +104,7 @@ public class RebuildableRaft : Mod
     {
         incomingSequences.Clear();
         outgoingSequences.Clear();
+        SecondaryRaftLootSpawner.Reset();
         MultiRaftRegistry.RebuildFromScene();
         RaftNameRegistry.LoadCurrentWorld();
         PlayerRaftPersistence.OnWorldLoaded();
@@ -118,6 +122,7 @@ public class RebuildableRaft : Mod
         RaftReceiverRadar.Reset();
         PlayerRaftPersistence.Reset();
         PlayerRaftRespawn.Reset();
+        SecondaryRaftLootSpawner.Reset();
         RaftNameRegistry.Reset();
         MultiRaftRegistry.Reset();
         incomingSequences.Clear();
@@ -130,6 +135,7 @@ public class RebuildableRaft : Mod
         RaftReceiverRadar.Reset();
         PlayerRaftPersistence.Reset();
         PlayerRaftRespawn.Reset();
+        SecondaryRaftLootSpawner.Reset();
 
         if (harmony != null)
         {
